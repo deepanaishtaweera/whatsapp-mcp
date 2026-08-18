@@ -134,6 +134,7 @@ Claude can access the following tools to interact with WhatsApp:
 - **get_chat**: Get information about a specific chat
 - **get_direct_chat_by_contact**: Find a direct chat with a specific contact
 - **get_contact_chats**: List all chats involving a specific contact
+- **get_group_participants**: List the contacts that are members of a group chat, with their names, phone numbers and admin status (requires the bridge to be running)
 - **get_last_interaction**: Get the most recent message with a contact
 - **get_message_context**: Retrieve context around a specific message
 - **send_message**: Send a WhatsApp message to a specified phone number or group JID

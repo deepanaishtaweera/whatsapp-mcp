@@ -202,6 +202,61 @@ type SendMessageRequest struct {
 	MediaPath string `json:"media_path,omitempty"`
 }
 
+// GroupParticipant represents a single member of a WhatsApp group
+type GroupParticipant struct {
+	JID          string `json:"jid"`
+	PhoneNumber  string `json:"phone_number,omitempty"`
+	Name         string `json:"name,omitempty"`
+	IsAdmin      bool   `json:"is_admin"`
+	IsSuperAdmin bool   `json:"is_super_admin"`
+}
+
+// GroupInfoResponse represents the response for the group info API
+type GroupInfoResponse struct {
+	JID              string             `json:"jid"`
+	Name             string             `json:"name"`
+	Topic            string             `json:"topic,omitempty"`
+	OwnerJID         string             `json:"owner_jid,omitempty"`
+	Created          time.Time          `json:"created"`
+	ParticipantCount int                `json:"participant_count"`
+	Participants     []GroupParticipant `json:"participants"`
+}
+
+// Extract the phone number of a group participant, which is empty when the
+// participant only exposes a hidden (LID) identity to the group.
+func participantPhoneNumber(participant types.GroupParticipant) string {
+	for _, jid := range []types.JID{participant.PhoneNumber, participant.JID} {
+		if jid.Server == types.DefaultUserServer {
+			return jid.User
+		}
+	}
+	return ""
+}
+
+// Look up the display name of a group participant in the contact store,
+// trying each identity the participant may be known by.
+func resolveParticipantName(ctx context.Context, client *whatsmeow.Client, participant types.GroupParticipant) string {
+	for _, jid := range []types.JID{participant.JID, participant.PhoneNumber, participant.LID} {
+		if jid.IsEmpty() {
+			continue
+		}
+
+		contact, err := client.Store.Contacts.GetContact(ctx, jid.ToNonAD())
+		if err != nil || !contact.Found {
+			continue
+		}
+
+		for _, name := range []string{contact.FullName, contact.BusinessName, contact.FirstName, contact.PushName} {
+			if name != "" {
+				return name
+			}
+		}
+	}
+
+	// Anonymous members in announcement groups only have an obfuscated name
+	return participant.DisplayName
+}
+
 // Function to send a WhatsApp message
 func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
 	if !client.IsConnected() {
@@ -677,6 +732,74 @@ func extractDirectPathFromURL(url string) string {
 
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+	// Handler for getting a group's metadata and member list
+	http.HandleFunc("/api/group/", func(w http.ResponseWriter, r *http.Request) {
+		// Only allow GET requests
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		jidStr := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/group/"), "/")
+		if jidStr == "" {
+			http.Error(w, "Group JID is required", http.StatusBadRequest)
+			return
+		}
+
+		jid, err := types.ParseJID(jidStr)
+		if err != nil {
+			http.Error(w, "Invalid JID: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if jid.Server != types.GroupServer {
+			http.Error(w, "JID is not a group JID (must end in @"+types.GroupServer+")", http.StatusBadRequest)
+			return
+		}
+
+		if !client.IsConnected() {
+			http.Error(w, "Not connected to WhatsApp", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Group info is fetched from the WhatsApp servers, so bound the wait
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		info, err := client.GetGroupInfo(ctx, jid)
+		if err != nil {
+			http.Error(w, "Failed to get group info: "+err.Error(), http.StatusNotFound)
+			return
+		}
+
+		participants := make([]GroupParticipant, 0, len(info.Participants))
+		for _, p := range info.Participants {
+			participants = append(participants, GroupParticipant{
+				JID:          p.JID.String(),
+				PhoneNumber:  participantPhoneNumber(p),
+				Name:         resolveParticipantName(ctx, client, p),
+				IsAdmin:      p.IsAdmin || p.IsSuperAdmin,
+				IsSuperAdmin: p.IsSuperAdmin,
+			})
+		}
+
+		owner := info.OwnerJID
+		if owner.IsEmpty() {
+			owner = info.OwnerPN
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(GroupInfoResponse{
+			JID:              info.JID.String(),
+			Name:             info.Name,
+			Topic:            info.Topic,
+			OwnerJID:         owner.String(),
+			Created:          info.GroupCreated,
+			ParticipantCount: len(participants),
+			Participants:     participants,
+		})
+	})
+
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests

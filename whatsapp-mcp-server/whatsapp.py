@@ -42,6 +42,24 @@ class Contact:
     jid: str
 
 @dataclass
+class GroupParticipant:
+    jid: str
+    phone_number: Optional[str]
+    name: Optional[str]
+    is_admin: bool
+    is_super_admin: bool
+
+@dataclass
+class GroupInfo:
+    jid: str
+    name: Optional[str]
+    topic: Optional[str]
+    owner_jid: Optional[str]
+    created: Optional[datetime]
+    participant_count: int
+    participants: List[GroupParticipant]
+
+@dataclass
 class MessageContext:
     message: Message
     before: List[Message]
@@ -621,6 +639,76 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
     finally:
         if 'conn' in locals():
             conn.close()
+
+def get_group_participants(chat_jid: str) -> Tuple[bool, str, Optional[GroupInfo]]:
+    """Get the members of a WhatsApp group from the bridge.
+
+    Args:
+        chat_jid: The group's JID (e.g. "123456789@g.us")
+
+    Returns:
+        A tuple of (success, status message, group info)
+    """
+    try:
+        # Validate input
+        if not chat_jid:
+            return False, "Group JID must be provided", None
+
+        if not chat_jid.endswith("@g.us"):
+            return False, f"'{chat_jid}' is not a group JID (group JIDs end in @g.us)", None
+
+        url = f"{WHATSAPP_API_BASE_URL}/group/{chat_jid}"
+        response = requests.get(url, timeout=60)
+
+        if response.status_code != 200:
+            return False, f"Error: HTTP {response.status_code} - {response.text.strip()}", None
+
+        data = response.json()
+
+        participants = []
+        for participant in data.get("participants", []):
+            jid = participant.get("jid", "")
+            name = participant.get("name") or None
+
+            # The bridge only knows contacts it has synced, so fall back to the
+            # name the local message database has seen for this JID
+            if not name and jid:
+                local_name = get_sender_name(jid)
+                name = local_name if local_name != jid else None
+
+            participants.append(GroupParticipant(
+                jid=jid,
+                phone_number=participant.get("phone_number") or None,
+                name=name,
+                is_admin=participant.get("is_admin", False),
+                is_super_admin=participant.get("is_super_admin", False),
+            ))
+
+        created = None
+        if data.get("created"):
+            try:
+                created = datetime.fromisoformat(data["created"].replace("Z", "+00:00"))
+            except ValueError:
+                created = None
+
+        group = GroupInfo(
+            jid=data.get("jid", chat_jid),
+            name=data.get("name") or None,
+            topic=data.get("topic") or None,
+            owner_jid=data.get("owner_jid") or None,
+            created=created,
+            participant_count=data.get("participant_count", len(participants)),
+            participants=participants,
+        )
+
+        return True, f"Found {len(participants)} participants", group
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", None
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}", None
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", None
 
 def send_message(recipient: str, message: str) -> Tuple[bool, str]:
     try:

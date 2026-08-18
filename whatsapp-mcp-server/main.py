@@ -6,6 +6,7 @@ from whatsapp import (
     list_chats as whatsapp_list_chats,
     get_chat as whatsapp_get_chat,
     get_direct_chat_by_contact as whatsapp_get_direct_chat_by_contact,
+    get_group_participants as whatsapp_get_group_participants,
     get_contact_chats as whatsapp_get_contact_chats,
     get_last_interaction as whatsapp_get_last_interaction,
     get_message_context as whatsapp_get_message_context,
@@ -115,6 +116,48 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
     """
     chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
     return chat
+
+@mcp.tool()
+def get_group_participants(chat_jid: str) -> Dict[str, Any]:
+    """List the contacts that are members of a WhatsApp group.
+
+    Requires the WhatsApp bridge to be running and connected.
+
+    Args:
+        chat_jid: The group's JID (e.g., "123456789@g.us"), as returned by list_chats
+
+    Returns:
+        A dictionary containing success status, a status message, the group metadata
+        and the list of participants with their names, phone numbers and admin status
+    """
+    success, status_message, group = whatsapp_get_group_participants(chat_jid)
+
+    if not success or group is None:
+        return {
+            "success": False,
+            "message": status_message
+        }
+
+    return {
+        "success": True,
+        "message": status_message,
+        "jid": group.jid,
+        "name": group.name,
+        "topic": group.topic,
+        "owner_jid": group.owner_jid,
+        "created": group.created.isoformat() if group.created else None,
+        "participant_count": group.participant_count,
+        "participants": [
+            {
+                "jid": participant.jid,
+                "phone_number": participant.phone_number,
+                "name": participant.name,
+                "is_admin": participant.is_admin,
+                "is_super_admin": participant.is_super_admin,
+            }
+            for participant in group.participants
+        ]
+    }
 
 @mcp.tool()
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str, Any]]:

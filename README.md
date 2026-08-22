@@ -90,10 +90,14 @@ Each WhatsApp number needs its own bridge process and its own MCP server entry. 
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `WHATSAPP_STORE_DIR` | `store` | Session database, message database and downloaded media for this account. Relative paths resolve against `whatsapp-bridge/`. |
+| `WHATSAPP_STORE_DIR` | `store` | Session database, message database and downloaded media for this account. An absolute path is recommended — see the note below. |
 | `WHATSAPP_API_PORT` | `8080` | Port the bridge's REST API listens on. Must be unique per running bridge. |
 
-Give both processes for one account the same values. Two further variables, `WHATSAPP_DB_PATH` and `WHATSAPP_API_BASE_URL`, override the derived message-database path and API URL on the Python side if you need the bridge and MCP server on different machines or layouts.
+Give both processes for one account the same values.
+
+> **Use an absolute path for `WHATSAPP_STORE_DIR`.** The two processes resolve a *relative* value differently: the bridge resolves it against its own working directory, while the MCP server resolves it against `whatsapp-bridge/`. They agree only when the bridge is started from `whatsapp-bridge/`, as in the examples below. Start the bridge from anywhere else and the pair will silently point at two different stores — the bridge writing messages to one, the MCP server reading an empty other. An absolute path removes the ambiguity.
+
+Two further variables, `WHATSAPP_DB_PATH` and `WHATSAPP_API_BASE_URL`, override the derived message-database path and API URL on the Python side if you need the bridge and MCP server on different machines or layouts.
 
 1. **Start one bridge per number**, each in its own terminal, and scan the QR code with the corresponding phone:
 

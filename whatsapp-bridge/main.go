@@ -45,6 +45,13 @@ func storeDir() string {
 	return "store"
 }
 
+// dbURI builds a SQLite "file:" DSN for a database inside dir. SQLite URIs use
+// forward slashes on every platform, so a Windows path separator would be read
+// as part of the filename rather than as a directory boundary.
+func dbURI(dir, name string) string {
+	return fmt.Sprintf("file:%s?_foreign_keys=on", filepath.ToSlash(filepath.Join(dir, name)))
+}
+
 // apiPort returns the port the REST API listens on. Each concurrently running
 // bridge needs a distinct WHATSAPP_API_PORT, so an unusable value is an error
 // rather than a silent fallback that would collide with another account.
@@ -84,7 +91,7 @@ func NewMessageStore() (*MessageStore, error) {
 	}
 
 	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_foreign_keys=on", filepath.Join(dir, "messages.db")))
+	db, err := sql.Open("sqlite3", dbURI(dir, "messages.db"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -965,7 +972,7 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New(context.Background(), "sqlite3", fmt.Sprintf("file:%s?_foreign_keys=on", filepath.Join(dir, "whatsapp.db")), dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", dbURI(dir, "whatsapp.db"), dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return

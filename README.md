@@ -84,6 +84,58 @@ Here's an example of what you can do when it's connected to Claude.
 
    Or restart Cursor.
 
+### Using Multiple WhatsApp Numbers
+
+Each WhatsApp number needs its own bridge process and its own MCP server entry. Two environment variables, read by both processes, keep the accounts apart:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `WHATSAPP_STORE_DIR` | `store` | Session database, message database and downloaded media for this account. Relative paths resolve against `whatsapp-bridge/`. |
+| `WHATSAPP_API_PORT` | `8080` | Port the bridge's REST API listens on. Must be unique per running bridge. |
+
+Give both processes for one account the same values. Two further variables, `WHATSAPP_DB_PATH` and `WHATSAPP_API_BASE_URL`, override the derived message-database path and API URL on the Python side if you need the bridge and MCP server on different machines or layouts.
+
+1. **Start one bridge per number**, each in its own terminal, and scan the QR code with the corresponding phone:
+
+   ```bash
+   cd whatsapp-bridge
+   WHATSAPP_STORE_DIR=store-personal WHATSAPP_API_PORT=8080 go run main.go
+   ```
+
+   ```bash
+   cd whatsapp-bridge
+   WHATSAPP_STORE_DIR=store-work WHATSAPP_API_PORT=8081 go run main.go
+   ```
+
+2. **Register one MCP server per number**, naming each after the account so the agent can tell them apart:
+
+   ```json
+   {
+     "mcpServers": {
+       "whatsapp-personal": {
+         "command": "{{PATH_TO_UV}}",
+         "args": ["--directory", "{{PATH_TO_SRC}}/whatsapp-mcp/whatsapp-mcp-server", "run", "main.py"],
+         "env": {
+           "WHATSAPP_STORE_DIR": "store-personal",
+           "WHATSAPP_API_PORT": "8080"
+         }
+       },
+       "whatsapp-work": {
+         "command": "{{PATH_TO_UV}}",
+         "args": ["--directory", "{{PATH_TO_SRC}}/whatsapp-mcp/whatsapp-mcp-server", "run", "main.py"],
+         "env": {
+           "WHATSAPP_STORE_DIR": "store-work",
+           "WHATSAPP_API_PORT": "8081"
+         }
+       }
+     }
+   }
+   ```
+
+The accounts stay fully isolated: separate databases, separate media directories, and one number needing re-authentication does not affect the other. Tools are namespaced by server name, so you ask for "my work WhatsApp" rather than passing an account argument. Note that each number still requires its own QR scan and its own periodic re-authentication.
+
+Omitting both variables preserves the original single-account behaviour, using `whatsapp-bridge/store/` and port 8080.
+
 ### Windows Compatibility
 
 If you're running this project on Windows, be aware that `go-sqlite3` requires **CGO to be enabled** in order to compile and work properly. By default, **CGO is disabled on Windows**, so you need to explicitly enable it and have a C compiler installed.
@@ -116,7 +168,7 @@ This application consists of two main components:
 
 ### Data Storage
 
-- All message history is stored in a SQLite database within the `whatsapp-bridge/store/` directory
+- All message history is stored in a SQLite database within the `whatsapp-bridge/store/` directory (or whatever `WHATSAPP_STORE_DIR` points at, when running more than one account)
 - The database maintains tables for chats and messages
 - Messages are indexed for efficient searching and retrieval
 

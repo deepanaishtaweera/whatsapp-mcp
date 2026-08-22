@@ -2,13 +2,44 @@ import sqlite3
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
+import os
 import os.path
 import requests
 import json
 import audio
 
-MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
-WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
+# One bridge process serves one WhatsApp number, so a second number means a
+# second bridge with its own store directory and port. These must match the
+# WHATSAPP_STORE_DIR / WHATSAPP_API_PORT given to the bridge for this account.
+BRIDGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge')
+
+
+def _resolve_store_dir() -> str:
+    """Locate this account's store directory.
+
+    A relative WHATSAPP_STORE_DIR is resolved against the bridge directory,
+    matching the bridge itself (which resolves it against its working
+    directory, normally whatsapp-bridge/). So the same value can be handed to
+    both processes.
+    """
+    store_dir = os.environ.get('WHATSAPP_STORE_DIR')
+    if not store_dir:
+        return os.path.join(BRIDGE_DIR, 'store')
+    if os.path.isabs(store_dir):
+        return store_dir
+    return os.path.join(BRIDGE_DIR, store_dir)
+
+
+def _resolve_api_base_url() -> str:
+    base_url = os.environ.get('WHATSAPP_API_BASE_URL')
+    if base_url:
+        return base_url.rstrip('/')
+    port = os.environ.get('WHATSAPP_API_PORT', '8080')
+    return f"http://localhost:{port}/api"
+
+
+MESSAGES_DB_PATH = os.environ.get('WHATSAPP_DB_PATH') or os.path.join(_resolve_store_dir(), 'messages.db')
+WHATSAPP_API_BASE_URL = _resolve_api_base_url()
 
 @dataclass
 class Message:

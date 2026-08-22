@@ -949,8 +949,10 @@ func main() {
 
 	port, err := apiPort()
 	if err != nil {
+		// Exit non-zero so supervisors and scripts can tell a misconfigured
+		// port from a clean shutdown.
 		logger.Errorf("%v", err)
-		return
+		os.Exit(1)
 	}
 
 	// Create database connection for storing session data

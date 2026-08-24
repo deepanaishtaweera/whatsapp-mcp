@@ -949,17 +949,24 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	}()
 }
 
+// main delegates to run so that deferred cleanup (closing the message store)
+// still executes on a failure path; os.Exit would skip it.
 func main() {
+	os.Exit(run())
+}
+
+// run starts the bridge and blocks until termination, returning the process
+// exit code. Every failure returns non-zero so supervisors, wrappers and CI
+// can distinguish a misconfigured or failed start from a clean shutdown.
+func run() int {
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
 
 	port, err := apiPort()
 	if err != nil {
-		// Exit non-zero so supervisors and scripts can tell a misconfigured
-		// port from a clean shutdown.
 		logger.Errorf("%v", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Create database connection for storing session data
@@ -969,13 +976,13 @@ func main() {
 	dir := storeDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		logger.Errorf("Failed to create store directory: %v", err)
-		return
+		return 1
 	}
 
 	container, err := sqlstore.New(context.Background(), "sqlite3", dbURI(dir, "whatsapp.db"), dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
-		return
+		return 1
 	}
 
 	// Get device store - This contains session information
@@ -987,7 +994,7 @@ func main() {
 			logger.Infof("Created new device")
 		} else {
 			logger.Errorf("Failed to get device: %v", err)
-			return
+			return 1
 		}
 	}
 
@@ -995,14 +1002,14 @@ func main() {
 	client := whatsmeow.NewClient(deviceStore, logger)
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
-		return
+		return 1
 	}
 
 	// Initialize message store
 	messageStore, err := NewMessageStore()
 	if err != nil {
 		logger.Errorf("Failed to initialize message store: %v", err)
-		return
+		return 1
 	}
 	defer messageStore.Close()
 
@@ -1035,7 +1042,7 @@ func main() {
 		err = client.Connect()
 		if err != nil {
 			logger.Errorf("Failed to connect: %v", err)
-			return
+			return 1
 		}
 
 		// Print QR code for pairing with phone
@@ -1056,14 +1063,14 @@ func main() {
 			fmt.Println("\nSuccessfully connected and authenticated!")
 		case <-time.After(3 * time.Minute):
 			logger.Errorf("Timeout waiting for QR code scan")
-			return
+			return 1
 		}
 	} else {
 		// Already logged in, just connect
 		err = client.Connect()
 		if err != nil {
 			logger.Errorf("Failed to connect: %v", err)
-			return
+			return 1
 		}
 		connected <- true
 	}
@@ -1073,7 +1080,7 @@ func main() {
 
 	if !client.IsConnected() {
 		logger.Errorf("Failed to establish stable connection")
-		return
+		return 1
 	}
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
@@ -1093,6 +1100,8 @@ func main() {
 	fmt.Println("Disconnecting...")
 	// Disconnect client
 	client.Disconnect()
+
+	return 0
 }
 
 // GetChatName determines the appropriate name for a chat based on JID and other info

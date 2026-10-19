@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 import os
 import os.path
 import requests
@@ -843,44 +843,25 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
-def download_media(message_id: str, chat_jid: str) -> Optional[str]:
-    """Download media from a message and return the local file path.
-    
-    Args:
-        message_id: The ID of the message containing the media
-        chat_jid: The JID of the chat containing the message
-    
-    Returns:
-        The local file path if download was successful, None otherwise
-    """
+def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
+    """Download attachment bytes, preserving actionable bridge errors."""
     try:
-        url = f"{WHATSAPP_API_BASE_URL}/download"
-        payload = {
-            "message_id": message_id,
-            "chat_jid": chat_jid
-        }
-        
-        response = requests.post(url, json=payload)
-        
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("success", False):
-                path = result.get("path")
-                print(f"Media downloaded successfully: {path}")
-                return path
-            else:
-                print(f"Download failed: {result.get('message', 'Unknown error')}")
-                return None
-        else:
-            print(f"Error: HTTP {response.status_code} - {response.text}")
-            return None
-            
-    except requests.RequestException as e:
-        print(f"Request error: {str(e)}")
-        return None
-    except json.JSONDecodeError:
-        print(f"Error parsing response: {response.text}")
-        return None
-    except Exception as e:
-        print(f"Unexpected error: {str(e)}")
-        return None
+        response = requests.post(
+            f"{WHATSAPP_API_BASE_URL}/download",
+            json={"message_id": message_id, "chat_jid": chat_jid},
+            timeout=60,
+        )
+        if response.status_code != 200:
+            return {"success": False, "message": f"Media bridge returned HTTP {response.status_code}"}
+        result = response.json()
+        if not isinstance(result, dict):
+            return {"success": False, "message": "Invalid media bridge response"}
+        if result.get("success") and result.get("path"):
+            return {"success": True, "message": "Media downloaded successfully", "file_path": result["path"]}
+        return {"success": False, "message": result.get("message") or "Media bridge returned no file path"}
+    except requests.Timeout:
+        return {"success": False, "message": "Media download timed out"}
+    except requests.RequestException:
+        return {"success": False, "message": "Cannot reach the WhatsApp media bridge"}
+    except (ValueError, TypeError):
+        return {"success": False, "message": "Invalid media bridge response"}

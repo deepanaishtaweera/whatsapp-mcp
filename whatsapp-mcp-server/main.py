@@ -14,6 +14,8 @@ from whatsapp import (
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
     send_status as whatsapp_send_status,
+    check_whatsapp_numbers as whatsapp_check_whatsapp_numbers,
+    get_contact_info as whatsapp_get_contact_info,
     download_media as whatsapp_download_media
 )
 
@@ -197,6 +199,41 @@ def get_message_context(
     """
     context = whatsapp_get_message_context(message_id, before, after)
     return context
+
+@mcp.tool()
+def check_whatsapp_numbers(phone_numbers: List[str]) -> Dict[str, Any]:
+    """Check which phone numbers are registered on WhatsApp, e.g. before messaging a new number.
+
+    Requires the WhatsApp bridge to be running and connected. Checks at most 50 numbers per
+    call; WhatsApp limits these lookups, so don't use it to scan large lists.
+
+    Args:
+        phone_numbers: Phone numbers in international format with country code,
+                       e.g. ["+94771234567", "+1 415 555 0100"]
+
+    Returns:
+        A dictionary containing success status, a summary message, and per number whether it is
+        on WhatsApp, its JID (usable as a send_message recipient) and any verified business name
+    """
+    return whatsapp_check_whatsapp_numbers(phone_numbers)
+
+@mcp.tool()
+def get_contact_info(contact: str) -> Dict[str, Any]:
+    """Get a contact's WhatsApp profile: name, about text, business name and profile picture.
+
+    Requires the WhatsApp bridge to be running and connected. Fields the contact hides
+    with their privacy settings are left out.
+
+    Args:
+        contact: A phone number with country code (e.g. "+94771234567") or a JID
+                 (e.g. "94771234567@s.whatsapp.net")
+
+    Returns:
+        A dictionary containing success status, a status message, and the contact's jid,
+        phone_number, name (from your address book), push_name (the name they set),
+        business_name, about, and picture_url or picture_note
+    """
+    return whatsapp_get_contact_info(contact)
 
 @mcp.tool()
 def send_message(

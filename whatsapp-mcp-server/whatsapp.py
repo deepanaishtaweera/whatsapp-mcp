@@ -6,6 +6,7 @@ import os
 import os.path
 import requests
 import json
+from urllib.parse import quote
 import audio
 
 # One bridge process serves one WhatsApp number, so a second number means a
@@ -729,6 +730,56 @@ def get_group_participants(chat_jid: str) -> Tuple[bool, str, Optional[GroupInfo
         return False, f"Error parsing response: {response.text}", None
     except Exception as e:
         return False, f"Unexpected error: {str(e)}", None
+
+def _bridge_error(response) -> str:
+    return f"Error: HTTP {response.status_code} - {response.text.strip()}"
+
+def check_whatsapp_numbers(phone_numbers: List[str]) -> Dict[str, Any]:
+    """Ask the bridge which phone numbers are registered on WhatsApp."""
+    try:
+        if not phone_numbers:
+            return {"success": False, "message": "At least one phone number must be provided"}
+
+        response = requests.post(
+            f"{WHATSAPP_API_BASE_URL}/check-numbers",
+            json={"phones": phone_numbers},
+            timeout=60,
+        )
+        if response.status_code != 200:
+            return {"success": False, "message": _bridge_error(response)}
+
+        results = response.json()
+        registered = sum(1 for result in results if result.get("on_whatsapp"))
+        return {
+            "success": True,
+            "message": f"{registered} of {len(results)} numbers are on WhatsApp",
+            "results": results,
+        }
+
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Request error: {str(e)}"}
+    except json.JSONDecodeError:
+        return {"success": False, "message": f"Error parsing response: {response.text}"}
+
+def get_contact_info(contact: str) -> Dict[str, Any]:
+    """Look up a contact's WhatsApp profile through the bridge."""
+    try:
+        if not contact:
+            return {"success": False, "message": "Phone number or JID must be provided"}
+
+        response = requests.get(
+            f"{WHATSAPP_API_BASE_URL}/contact/{quote(contact.strip(), safe='@+')}",
+            timeout=60,
+        )
+        if response.status_code != 200:
+            return {"success": False, "message": _bridge_error(response)}
+
+        return {"success": True, "message": "Found contact", **response.json()}
+
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Request error: {str(e)}"}
+    except json.JSONDecodeError:
+        return {"success": False, "message": f"Error parsing response: {response.text}"}
 
 def send_message(recipient: str, message: str) -> Tuple[bool, str]:
     try:

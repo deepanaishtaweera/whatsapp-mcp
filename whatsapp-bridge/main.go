@@ -478,6 +478,65 @@ type GroupInfoResponse struct {
 	Participants     []GroupParticipant `json:"participants"`
 }
 
+// Most numbers a single check-numbers request may look up. WhatsApp limits
+// contact discovery, and bulk lookups can get an account flagged.
+const maxNumberChecks = 50
+
+// CheckNumbersRequest represents the request body for the check numbers API
+type CheckNumbersRequest struct {
+	Phones []string `json:"phones"`
+}
+
+// NumberCheckResult reports whether one phone number is on WhatsApp
+type NumberCheckResult struct {
+	Phone        string `json:"phone"`
+	OnWhatsApp   bool   `json:"on_whatsapp"`
+	JID          string `json:"jid,omitempty"`
+	BusinessName string `json:"business_name,omitempty"`
+}
+
+// ContactInfoResponse represents the response for the contact info API
+type ContactInfoResponse struct {
+	JID          string `json:"jid"`
+	PhoneNumber  string `json:"phone_number,omitempty"`
+	Name         string `json:"name,omitempty"`
+	PushName     string `json:"push_name,omitempty"`
+	BusinessName string `json:"business_name,omitempty"`
+	About        string `json:"about,omitempty"`
+	PictureURL   string `json:"picture_url,omitempty"`
+	PictureNote  string `json:"picture_note,omitempty"`
+}
+
+// Reduce a phone number as people write it ("+94 77-123 4567") to digits
+// with the country code, the form WhatsApp user IDs use.
+func normalizePhone(phone string) (string, error) {
+	digits := strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '-', '(', ')', '.':
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(phone))
+	digits = strings.TrimPrefix(digits, "+")
+	digits = strings.TrimPrefix(digits, "00")
+
+	if len(digits) < 7 || len(digits) > 15 || strings.TrimLeft(digits, "0123456789") != "" {
+		return "", fmt.Errorf("invalid phone number %q: use international format with country code, e.g. +94771234567", phone)
+	}
+	if digits[0] == '0' {
+		return "", fmt.Errorf("invalid phone number %q: a local number needs its country code, e.g. +94771234567", phone)
+	}
+	return digits, nil
+}
+
+// Business name from a verified business profile, if the user has one.
+func verifiedBusinessName(vn *types.VerifiedName) string {
+	if vn == nil {
+		return ""
+	}
+	return vn.Details.GetVerifiedName()
+}
+
 // Extract the phone number of a group participant, which is empty when the
 // participant only exposes a hidden (LID) identity to the group.
 func participantPhoneNumber(participant types.GroupParticipant) string {
@@ -1217,6 +1276,164 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			ParticipantCount: len(participants),
 			Participants:     participants,
 		})
+	})
+
+	// Handler for checking which phone numbers are on WhatsApp
+	http.HandleFunc("/api/check-numbers", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req CheckNumbersRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Phones) == 0 {
+			http.Error(w, "At least one phone number is required", http.StatusBadRequest)
+			return
+		}
+		if len(req.Phones) > maxNumberChecks {
+			http.Error(w, fmt.Sprintf("At most %d phone numbers can be checked at once", maxNumberChecks), http.StatusBadRequest)
+			return
+		}
+
+		phones := make([]string, len(req.Phones))
+		queries := make([]string, len(req.Phones))
+		for i, phone := range req.Phones {
+			normalized, err := normalizePhone(phone)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			phones[i] = normalized
+			queries[i] = "+" + normalized
+		}
+
+		if !client.IsConnected() {
+			http.Error(w, "Not connected to WhatsApp", http.StatusServiceUnavailable)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		responses, err := client.IsOnWhatsApp(ctx, queries)
+		if err != nil {
+			http.Error(w, "Failed to check numbers: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		// Numbers that are not registered can be missing from the response
+		byQuery := make(map[string]types.IsOnWhatsAppResponse, len(responses))
+		for _, resp := range responses {
+			byQuery[strings.TrimPrefix(resp.Query, "+")] = resp
+		}
+
+		results := make([]NumberCheckResult, len(phones))
+		for i, phone := range phones {
+			results[i] = NumberCheckResult{Phone: phone}
+			if resp, ok := byQuery[phone]; ok && resp.IsIn {
+				results[i].OnWhatsApp = true
+				results[i].JID = resp.JID.String()
+				results[i].BusinessName = verifiedBusinessName(resp.VerifiedName)
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(results)
+	})
+
+	// Handler for looking up a contact's WhatsApp profile
+	http.HandleFunc("/api/contact/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		contact := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/contact/"), "/")
+		if contact == "" {
+			http.Error(w, "Phone number or JID is required", http.StatusBadRequest)
+			return
+		}
+
+		var jid types.JID
+		if strings.Contains(contact, "@") {
+			parsed, err := types.ParseJID(contact)
+			if err != nil {
+				http.Error(w, "Invalid JID: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			jid = parsed.ToNonAD()
+		} else {
+			phone, err := normalizePhone(contact)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			jid = types.NewJID(phone, types.DefaultUserServer)
+		}
+
+		if jid.Server == types.GroupServer {
+			http.Error(w, "That is a group JID; use the group endpoint instead", http.StatusBadRequest)
+			return
+		}
+
+		if !client.IsConnected() {
+			http.Error(w, "Not connected to WhatsApp", http.StatusServiceUnavailable)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		users, err := client.GetUserInfo(ctx, []types.JID{jid})
+		if err != nil {
+			http.Error(w, "Failed to get contact info: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		user, ok := users[jid]
+		if !ok {
+			http.Error(w, "Not on WhatsApp: "+jid.String(), http.StatusNotFound)
+			return
+		}
+
+		info := ContactInfoResponse{
+			JID:          jid.String(),
+			BusinessName: verifiedBusinessName(user.VerifiedName),
+			About:        user.Status,
+		}
+		if jid.Server == types.DefaultUserServer {
+			info.PhoneNumber = jid.User
+		}
+
+		// Names come from the address book synced from the phone
+		if stored, err := client.Store.Contacts.GetContact(ctx, jid); err == nil && stored.Found {
+			for _, name := range []string{stored.FullName, stored.FirstName, stored.BusinessName} {
+				if name != "" {
+					info.Name = name
+					break
+				}
+			}
+			info.PushName = stored.PushName
+		}
+
+		picture, err := client.GetProfilePictureInfo(ctx, jid, &whatsmeow.GetProfilePictureParams{})
+		switch {
+		case errors.Is(err, whatsmeow.ErrProfilePictureUnauthorized):
+			info.PictureNote = "hidden by the contact's privacy settings"
+		case errors.Is(err, whatsmeow.ErrProfilePictureNotSet):
+			info.PictureNote = "no profile picture"
+		case err != nil:
+			info.PictureNote = "could not load profile picture"
+		case picture != nil:
+			info.PictureURL = picture.URL
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(info)
 	})
 
 	// Handler for sending messages

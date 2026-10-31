@@ -312,7 +312,7 @@ def send_status(
 
     Args:
         message: The status text, or the caption when media_path is given
-        media_path: Optional absolute path to an image (jpg, png, gif, webp) or video (mp4, avi, mov) to post
+        media_path: Optional absolute path to an image (jpg, png, webp) or video (mp4, avi, mov) to post; convert GIFs to mp4
         background_color: Optional background for a text status as "#RRGGBB" (defaults to dark teal); ignored for media
 
     Returns:

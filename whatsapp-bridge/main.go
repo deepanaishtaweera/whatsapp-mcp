@@ -215,7 +215,7 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 	}
 
 	// A message seen again (history syncs repeat) keeps an edit or deletion
-	// that was applied to it, rather than reverting to the original text
+	// that was applied to it, rather than reverting to the original
 	_, err := store.db.Exec(
 		`INSERT INTO messages
 		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length,
@@ -223,7 +223,7 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (id, chat_jid) DO UPDATE SET
 			sender = excluded.sender,
-			content = CASE WHEN messages.is_deleted OR messages.edited_at IS NOT NULL THEN messages.content ELSE excluded.content END,
+			content = CASE WHEN messages.edited_at IS NOT NULL THEN messages.content ELSE excluded.content END,
 			timestamp = excluded.timestamp,
 			is_from_me = excluded.is_from_me,
 			media_type = excluded.media_type,
@@ -235,7 +235,8 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 			file_length = excluded.file_length,
 			quoted_message_id = excluded.quoted_message_id,
 			quoted_sender = excluded.quoted_sender,
-			quoted_content = excluded.quoted_content`,
+			quoted_content = excluded.quoted_content
+		WHERE NOT messages.is_deleted`,
 		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
 		nullIfEmpty(quoted.ID), nullIfEmpty(quoted.Sender), nullIfEmpty(quoted.Content),
 	)
@@ -275,10 +276,14 @@ func (store *MessageStore) EditMessage(id, chatJID, content string, editedAt tim
 	return err
 }
 
-// Mark a message deleted for everyone and drop its text, as WhatsApp does.
+// Mark a message deleted for everyone and drop its text and the keys needed
+// to download its media, as WhatsApp does. The media type is kept so the
+// message still reads as a deleted photo, video, etc.
 func (store *MessageStore) DeleteMessage(id, chatJID string) error {
 	_, err := store.db.Exec(
-		"UPDATE messages SET content = '', is_deleted = 1 WHERE id = ? AND chat_jid = ?",
+		`UPDATE messages SET content = '', is_deleted = 1, url = '', media_key = NULL,
+			file_sha256 = NULL, file_enc_sha256 = NULL, file_length = 0
+		WHERE id = ? AND chat_jid = ?`,
 		id, chatJID,
 	)
 	return err
@@ -398,8 +403,13 @@ func extractQuotedMessage(msg *waProto.Message) QuotedMessage {
 	}
 }
 
-// Get the user part of a JID string, which is how senders are stored.
+// Get the user part of a JID string, which is how senders are stored. A
+// string without a server is already a user part; ParseJID would read it as
+// a server instead.
 func jidUser(jid string) string {
+	if !strings.Contains(jid, "@") {
+		return jid
+	}
 	if parsed, err := types.ParseJID(jid); err == nil {
 		return parsed.User
 	}
@@ -783,9 +793,10 @@ func sendWhatsAppStatus(client *whatsmeow.Client, message string, mediaPath stri
 	if mediaPath != "" {
 		// Check before uploading, as anything else would be sent as a document
 		switch strings.ToLower(filepath.Ext(mediaPath)) {
-		case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".avi", ".mov":
+		case ".jpg", ".jpeg", ".png", ".webp", ".mp4", ".avi", ".mov":
 		default:
-			return false, "Status media must be an image (jpg, png, gif, webp) or a video (mp4, avi, mov)"
+			// GIFs are excluded: WhatsApp plays them as looping video, not images
+			return false, "Status media must be an image (jpg, png, webp) or a video (mp4, avi, mov); convert GIFs to mp4"
 		}
 
 		var err error
@@ -1114,7 +1125,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		if parseErr != nil {
 			return false, "", "", "", parseErr
 		}
-		senderJID, parseErr := types.ParseJID(sender)
+		senderJID, parseErr := resolveSenderJID(ctx, client, sender)
 		if parseErr != nil {
 			return false, "", "", "", parseErr
 		}
@@ -1126,8 +1137,11 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		downloader.DirectPath = newPath
 		mediaData, err = client.Download(ctx, downloader)
 		if err == nil {
-			// Retain the renewed signed path for subsequent downloads.
-			_, err = messageStore.db.Exec("UPDATE messages SET url = ? WHERE id = ? AND chat_jid = ?", "https://mmg.whatsapp.net"+newPath, messageID, chatJID)
+			// Retain the renewed signed path for subsequent downloads. Failing
+			// to cache it only costs a renewal next time, so keep the download.
+			if _, dbErr := messageStore.db.Exec("UPDATE messages SET url = ? WHERE id = ? AND chat_jid = ?", "https://mmg.whatsapp.net"+newPath, messageID, chatJID); dbErr != nil {
+				fmt.Printf("Failed to cache renewed media path: %v\n", dbErr)
+			}
 		}
 	}
 	if err != nil {
@@ -1141,6 +1155,23 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 
 	fmt.Printf("Successfully downloaded %s media to %s (%d bytes)\n", mediaType, absPath, len(mediaData))
 	return true, mediaType, filename, absPath, nil
+}
+
+// Stored senders are bare user parts, so whether one is a phone number or a
+// hidden (LID) identity is lost. A user the store has a phone-number mapping
+// for is a LID; anything else is taken as a phone number.
+func resolveSenderJID(ctx context.Context, client *whatsmeow.Client, sender string) (types.JID, error) {
+	if strings.Contains(sender, "@") {
+		return types.ParseJID(sender)
+	}
+	if sender == "" {
+		return types.JID{}, fmt.Errorf("message has no stored sender")
+	}
+	lid := types.NewJID(sender, types.HiddenUserServer)
+	if pn, err := client.Store.LIDs.GetPNForLID(ctx, lid); err == nil && !pn.IsEmpty() {
+		return lid, nil
+	}
+	return types.NewJID(sender, types.DefaultUserServer), nil
 }
 
 // mediaFileMatches avoids collisions and rejects partial cached downloads.

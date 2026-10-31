@@ -69,6 +69,13 @@ MESSAGE_COLUMNS = """
      WHERE reactions.message_id = messages.id AND reactions.chat_jid = messages.chat_jid)
 """
 
+def _schema_error(e: sqlite3.Error) -> Optional[str]:
+    """Explain a query failure caused by a database the bridge hasn't upgraded yet."""
+    if "no such column" in str(e) or "no such table" in str(e):
+        return ("The message database was created by an older WhatsApp bridge. "
+                "Restart the bridge so it can upgrade the database, then try again.")
+    return None
+
 def _message_from_row(row) -> Message:
     return Message(
         timestamp=datetime.fromisoformat(row[0]),
@@ -184,7 +191,9 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
         output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
         
     content_prefix = ""
-    if hasattr(message, 'media_type') and message.media_type:
+    if message.media_type and message.is_deleted:
+        content_prefix = f"[{message.media_type}] "
+    elif message.media_type:
         content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
     
     content = message.content
@@ -304,7 +313,7 @@ def list_messages(
         
     except sqlite3.Error as e:
         print(f"Database error: {e}")
-        return []
+        return _schema_error(e) or []
     finally:
         if 'conn' in locals():
             conn.close()
@@ -366,6 +375,8 @@ def get_message_context(
         
     except sqlite3.Error as e:
         print(f"Database error: {e}")
+        if message := _schema_error(e):
+            raise ValueError(message) from e
         raise
     finally:
         if 'conn' in locals():
@@ -565,7 +576,7 @@ def get_last_interaction(jid: str) -> str:
         
     except sqlite3.Error as e:
         print(f"Database error: {e}")
-        return None
+        return _schema_error(e)
     finally:
         if 'conn' in locals():
             conn.close()

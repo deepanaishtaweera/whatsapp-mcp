@@ -236,3 +236,45 @@ func TestStoreMessageKeepsReplyContext(t *testing.T) {
 		t.Errorf("plain message has quoted id %q, want NULL", got.quotedID.String)
 	}
 }
+
+func TestJIDUser(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		// History sync passes bare user parts as well as full JIDs
+		{"94771234567", "94771234567"},
+		{"94771234567@s.whatsapp.net", "94771234567"},
+		{"94771234567:12@s.whatsapp.net", "94771234567"},
+		{"240115079213275@lid", "240115079213275"},
+	} {
+		if got := jidUser(tc.input); got != tc.want {
+			t.Errorf("jidUser(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestDeletedMediaCannotBeRestoredOrDownloaded(t *testing.T) {
+	store := newTestStore(t)
+	storeMedia := func() {
+		err := store.StoreMessage("p1", testChat, "123", "", time.Unix(1000, 0), false, "image", "p.jpg",
+			"https://mmg.whatsapp.net/p", []byte("key"), make([]byte, 32), make([]byte, 32), 10, QuotedMessage{})
+		if err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+	}
+	storeMedia()
+	if err := store.DeleteMessage("p1", testChat); err != nil {
+		t.Fatalf("DeleteMessage: %v", err)
+	}
+	storeMedia() // a history resync replaying the photo
+
+	var mediaType, url string
+	var mediaKey []byte
+	var deleted bool
+	err := store.db.QueryRow("SELECT media_type, url, media_key, is_deleted FROM messages WHERE id = 'p1'").
+		Scan(&mediaType, &url, &mediaKey, &deleted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mediaType != "image" || url != "" || mediaKey != nil || !deleted {
+		t.Errorf("deleted photo after resync: type=%q url=%q key=%v deleted=%v", mediaType, url, mediaKey, deleted)
+	}
+}

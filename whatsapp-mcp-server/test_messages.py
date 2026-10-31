@@ -70,5 +70,30 @@ class MessageFormattingTests(unittest.TestCase):
         self.assertEqual(context.before[0].reactions, "👍❤️")
         self.assertTrue(context.after[0].is_deleted)
 
+    def test_deleted_media_hides_message_id(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE messages SET is_deleted = 1, content = '' WHERE id = 'm4'")
+        conn.commit()
+        conn.close()
+        self.assertIn("[image] [deleted]", self.lines())
+
+class OldDatabaseTests(unittest.TestCase):
+    def test_unmigrated_database_explains_itself(self):
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.addCleanup(os.remove, db_path)
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE chats (jid TEXT PRIMARY KEY, name TEXT, last_message_time TIMESTAMP);
+            CREATE TABLE messages (id TEXT, chat_jid TEXT, sender TEXT, content TEXT, timestamp TIMESTAMP,
+                is_from_me BOOLEAN, media_type TEXT, PRIMARY KEY (id, chat_jid));
+        """)
+        conn.close()
+        with patch.object(whatsapp, "MESSAGES_DB_PATH", db_path):
+            self.assertIn("Restart the bridge", whatsapp.list_messages(include_context=False))
+            self.assertIn("Restart the bridge", whatsapp.get_last_interaction(CHAT))
+            with self.assertRaisesRegex(ValueError, "Restart the bridge"):
+                whatsapp.get_message_context("m1")
+
 if __name__ == '__main__':
     unittest.main()

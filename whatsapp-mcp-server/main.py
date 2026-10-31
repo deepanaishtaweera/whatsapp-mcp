@@ -13,6 +13,7 @@ from whatsapp import (
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
+    send_status as whatsapp_send_status,
     download_media as whatsapp_download_media
 )
 
@@ -259,6 +260,28 @@ def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
         A dictionary containing success status and a status message
     """
     success, status_message = whatsapp_audio_voice_message(recipient, media_path)
+    return {
+        "success": success,
+        "message": status_message
+    }
+
+@mcp.tool()
+def send_status(
+    message: str = "",
+    media_path: Optional[str] = None,
+    background_color: Optional[str] = None
+) -> Dict[str, Any]:
+    """Post a WhatsApp status update (story). It is shown to the contacts allowed by the account's status privacy setting.
+
+    Args:
+        message: The status text, or the caption when media_path is given
+        media_path: Optional absolute path to an image (jpg, png, gif, webp) or video (mp4, avi, mov) to post
+        background_color: Optional background for a text status as "#RRGGBB" (defaults to dark teal); ignored for media
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, status_message = whatsapp_send_status(message, media_path, background_color)
     return {
         "success": success,
         "message": status_message

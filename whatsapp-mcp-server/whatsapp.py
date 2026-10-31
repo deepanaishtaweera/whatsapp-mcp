@@ -51,6 +51,39 @@ class Message:
     id: str
     chat_name: Optional[str] = None
     media_type: Optional[str] = None
+    quoted_sender: Optional[str] = None
+    quoted_content: Optional[str] = None
+    is_edited: bool = False
+    is_deleted: bool = False
+    reactions: Optional[str] = None
+
+# Columns selected for every Message (messages joined with chats), in the
+# order _message_from_row reads them. Reactions come back as one string of
+# emojis, one per person who reacted.
+MESSAGE_COLUMNS = """
+    messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me,
+    chats.jid, messages.id, messages.media_type, messages.quoted_sender, messages.quoted_content,
+    messages.edited_at IS NOT NULL, messages.is_deleted,
+    (SELECT group_concat(reactions.emoji, '') FROM reactions
+     WHERE reactions.message_id = messages.id AND reactions.chat_jid = messages.chat_jid)
+"""
+
+def _message_from_row(row) -> Message:
+    return Message(
+        timestamp=datetime.fromisoformat(row[0]),
+        sender=row[1],
+        chat_name=row[2],
+        content=row[3],
+        is_from_me=row[4],
+        chat_jid=row[5],
+        id=row[6],
+        media_type=row[7],
+        quoted_sender=row[8],
+        quoted_content=row[9],
+        is_edited=bool(row[10]),
+        is_deleted=bool(row[11]),
+        reactions=row[12],
+    )
 
 @dataclass
 class Chat:
@@ -153,9 +186,25 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
     if hasattr(message, 'media_type') and message.media_type:
         content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
     
+    content = message.content
+    if message.is_deleted:
+        content = "[deleted]"
+    elif message.is_edited:
+        content += " (edited)"
+
+    reply_prefix = ""
+    if message.quoted_content is not None or message.quoted_sender:
+        quoted = message.quoted_content or ""
+        if len(quoted) > 80:
+            quoted = quoted[:77] + "..."
+        quoted_name = get_sender_name(message.quoted_sender) if message.quoted_sender else "earlier message"
+        reply_prefix = f'[replying to {quoted_name}: "{quoted}"] '
+
+    reactions_suffix = f" [reactions: {message.reactions}]" if message.reactions else ""
+
     try:
         sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
-        output += f"From: {sender_name}: {content_prefix}{message.content}\n"
+        output += f"From: {sender_name}: {content_prefix}{reply_prefix}{content}{reactions_suffix}\n"
     except Exception as e:
         print(f"Error formatting message: {e}")
     return output
@@ -188,7 +237,7 @@ def list_messages(
         cursor = conn.cursor()
         
         # Build base query
-        query_parts = ["SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages"]
+        query_parts = [f"SELECT {MESSAGE_COLUMNS} FROM messages"]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
         where_clauses = []
         params = []
@@ -236,19 +285,7 @@ def list_messages(
         cursor.execute(" ".join(query_parts), tuple(params))
         messages = cursor.fetchall()
         
-        result = []
-        for msg in messages:
-            message = Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7]
-            )
-            result.append(message)
+        result = [_message_from_row(msg) for msg in messages]
             
         if include_context and result:
             # Add context for each message
@@ -283,8 +320,8 @@ def get_message_context(
         cursor = conn.cursor()
         
         # Get the target message first
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
+        cursor.execute(f"""
+            SELECT {MESSAGE_COLUMNS}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.id = ?
@@ -294,62 +331,31 @@ def get_message_context(
         if not msg_data:
             raise ValueError(f"Message with ID {message_id} not found")
             
-        target_message = Message(
-            timestamp=datetime.fromisoformat(msg_data[0]),
-            sender=msg_data[1],
-            chat_name=msg_data[2],
-            content=msg_data[3],
-            is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
-            id=msg_data[6],
-            media_type=msg_data[8]
-        )
+        target_message = _message_from_row(msg_data)
         
         # Get messages before
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
+        cursor.execute(f"""
+            SELECT {MESSAGE_COLUMNS}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp < ?
             ORDER BY messages.timestamp DESC
             LIMIT ?
-        """, (msg_data[7], msg_data[0], before))
+        """, (target_message.chat_jid, msg_data[0], before))
         
-        before_messages = []
-        for msg in cursor.fetchall():
-            before_messages.append(Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7]
-            ))
+        before_messages = [_message_from_row(msg) for msg in cursor.fetchall()]
         
         # Get messages after
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
+        cursor.execute(f"""
+            SELECT {MESSAGE_COLUMNS}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp > ?
             ORDER BY messages.timestamp ASC
             LIMIT ?
-        """, (msg_data[7], msg_data[0], after))
+        """, (target_message.chat_jid, msg_data[0], after))
         
-        after_messages = []
-        for msg in cursor.fetchall():
-            after_messages.append(Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7]
-            ))
+        after_messages = [_message_from_row(msg) for msg in cursor.fetchall()]
         
         return MessageContext(
             message=target_message,
@@ -538,20 +544,12 @@ def get_last_interaction(jid: str) -> str:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
         
-        cursor.execute("""
-            SELECT 
-                m.timestamp,
-                m.sender,
-                c.name,
-                m.content,
-                m.is_from_me,
-                c.jid,
-                m.id,
-                m.media_type
-            FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.sender = ? OR c.jid = ?
-            ORDER BY m.timestamp DESC
+        cursor.execute(f"""
+            SELECT {MESSAGE_COLUMNS}
+            FROM messages
+            JOIN chats ON messages.chat_jid = chats.jid
+            WHERE messages.sender = ? OR chats.jid = ?
+            ORDER BY messages.timestamp DESC
             LIMIT 1
         """, (jid, jid))
         
@@ -560,16 +558,7 @@ def get_last_interaction(jid: str) -> str:
         if not msg_data:
             return None
             
-        message = Message(
-            timestamp=datetime.fromisoformat(msg_data[0]),
-            sender=msg_data[1],
-            chat_name=msg_data[2],
-            content=msg_data[3],
-            is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
-            id=msg_data[6],
-            media_type=msg_data[7]
-        )
+        message = _message_from_row(msg_data)
         
         return format_message(message)
         
@@ -803,6 +792,38 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
+def send_status(message: str = "", media_path: Optional[str] = None, background_color: Optional[str] = None) -> Tuple[bool, str]:
+    try:
+        # Validate input
+        if not message and not media_path:
+            return False, "Message or media path must be provided"
+
+        if media_path and not os.path.isfile(media_path):
+            return False, f"Media file not found: {media_path}"
+
+        url = f"{WHATSAPP_API_BASE_URL}/status"
+        payload = {"message": message}
+        if media_path:
+            payload["media_path"] = media_path
+        if background_color:
+            payload["background_color"] = background_color
+
+        response = requests.post(url, json=payload)
+
+        # Check if the request was successful
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        else:
+            return False, f"Error: HTTP {response.status_code} - {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
 def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
     try:
         # Validate input
@@ -852,7 +873,20 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
             timeout=60,
         )
         if response.status_code != 200:
-            return {"success": False, "message": f"Media bridge returned HTTP {response.status_code}"}
+            # Show useful failure classes without exposing signed URLs or keys.
+            try:
+                detail = str(response.json().get("message", ""))
+            except (ValueError, AttributeError):
+                detail = ""
+            if "phone could not renew media:" in detail:
+                reason = "Attachment unavailable on linked phone"
+            elif "linked phone did not renew" in detail:
+                reason = "Media link expired; open WhatsApp on the linked phone and retry"
+            elif "status code 404" in detail or "status code 410" in detail:
+                reason = "WhatsApp media link expired or attachment unavailable"
+            else:
+                reason = f"Media bridge returned HTTP {response.status_code}"
+            return {"success": False, "message": reason}
         result = response.json()
         if not isinstance(result, dict):
             return {"success": False, "message": "Invalid media bridge response"}

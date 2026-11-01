@@ -872,6 +872,40 @@ def send_reaction(chat_jid: str, message_id: str, emoji: str) -> Tuple[bool, str
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
 
+def edit_message(chat_jid: str, message_id: str, text: str) -> Tuple[bool, str]:
+    """Replace the text of one of our recent messages."""
+    try:
+        if not chat_jid or not message_id:
+            return False, "Chat JID and message ID must be provided"
+        if not text.strip():
+            return False, "New text must be provided"
+
+        response = requests.post(
+            f"{WHATSAPP_API_BASE_URL}/edit",
+            json={"chat_jid": chat_jid, "message_id": message_id, "text": text},
+            timeout=60,
+        )
+        return _bridge_result(response)
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+def delete_message(chat_jid: str, message_id: str) -> Tuple[bool, str]:
+    """Delete one of our messages for everyone in the chat."""
+    try:
+        if not chat_jid or not message_id:
+            return False, "Chat JID and message ID must be provided"
+
+        response = requests.post(
+            f"{WHATSAPP_API_BASE_URL}/delete",
+            json={"chat_jid": chat_jid, "message_id": message_id},
+            timeout=60,
+        )
+        return _bridge_result(response)
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
 def send_status(message: str = "", media_path: Optional[str] = None, background_color: Optional[str] = None) -> Tuple[bool, str]:
     try:
         # Validate input

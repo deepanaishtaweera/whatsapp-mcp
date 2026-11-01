@@ -294,6 +294,7 @@ func (store *MessageStore) DeleteMessage(id, chatJID string) error {
 // A stored message that an outgoing reply or reaction refers to
 type StoredMessage struct {
 	Sender    string
+	Timestamp time.Time
 	IsFromMe  bool
 	Content   string
 	MediaType string
@@ -305,11 +306,11 @@ type StoredMessage struct {
 func (store *MessageStore) GetMessage(id, chatJID string) (StoredMessage, error) {
 	var msg StoredMessage
 	err := store.db.QueryRow(
-		`SELECT COALESCE(sender, ''), is_from_me, COALESCE(content, ''), COALESCE(media_type, ''),
+		`SELECT COALESCE(sender, ''), timestamp, is_from_me, COALESCE(content, ''), COALESCE(media_type, ''),
 			COALESCE(filename, ''), is_deleted
 		FROM messages WHERE id = ? AND chat_jid = ?`,
 		id, chatJID,
-	).Scan(&msg.Sender, &msg.IsFromMe, &msg.Content, &msg.MediaType, &msg.Filename, &msg.IsDeleted)
+	).Scan(&msg.Sender, &msg.Timestamp, &msg.IsFromMe, &msg.Content, &msg.MediaType, &msg.Filename, &msg.IsDeleted)
 	return msg, err
 }
 
@@ -504,6 +505,19 @@ type SendReactionRequest struct {
 	Emoji     string `json:"emoji"`
 }
 
+// EditMessageRequest represents the request body for the edit API
+type EditMessageRequest struct {
+	ChatJID   string `json:"chat_jid"`
+	MessageID string `json:"message_id"`
+	Text      string `json:"text"`
+}
+
+// DeleteMessageRequest represents the request body for the delete API
+type DeleteMessageRequest struct {
+	ChatJID   string `json:"chat_jid"`
+	MessageID string `json:"message_id"`
+}
+
 // PostStatusRequest represents the request body for the post status API
 type PostStatusRequest struct {
 	Message         string `json:"message"`
@@ -674,13 +688,107 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	}
 
 	// Send message
-	_, err = client.SendMessage(context.Background(), recipientJID, msg)
+	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
 		return false, fmt.Sprintf("Error sending message: %v", err)
 	}
 
-	return true, fmt.Sprintf("Message sent to %s", recipient)
+	name := GetChatName(client, messageStore, recipientJID, recipientJID.String(), nil, "", waLog.Noop)
+	sender := ownJIDFor(client, recipientJID).User
+	if err := storeSentMessage(messageStore, recipientJID, name, sender, resp.ID, resp.Timestamp, msg); err != nil {
+		fmt.Printf("Message sent but not stored: %v\n", err)
+	}
+
+	return true, fmt.Sprintf("Message sent to %s (ID: %s)", recipient, resp.ID)
+}
+
+// Save a message we sent. Our own messages don't come back as events, so
+// without this they would only appear after a history sync.
+func storeSentMessage(messageStore *MessageStore, chat types.JID, chatName, sender, id string, timestamp time.Time, msg *waProto.Message) error {
+	chatJID := chat.String()
+	if err := messageStore.StoreChat(chatJID, chatName, timestamp); err != nil {
+		return err
+	}
+	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg)
+	return messageStore.StoreMessage(id, chatJID, sender, extractTextContent(msg), timestamp, true,
+		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, extractQuotedMessage(msg))
+}
+
+// How long WhatsApp lets you edit a message, or delete it for everyone
+const (
+	editWindow   = 15 * time.Minute
+	deleteWindow = 60 * time.Hour
+)
+
+// Load one of our own messages that is still recent enough to change.
+func loadOwnMessage(messageStore *MessageStore, chat types.JID, id string, window time.Duration, action string) (StoredMessage, error) {
+	target, err := loadTargetMessage(messageStore, chat, id)
+	if err != nil {
+		return StoredMessage{}, err
+	}
+	if !target.IsFromMe {
+		return StoredMessage{}, fmt.Errorf("can only %s your own messages", action)
+	}
+	if age := time.Since(target.Timestamp); age > window {
+		return StoredMessage{}, fmt.Errorf("message %s is too old to %s: WhatsApp allows it for %s and it was sent %s ago",
+			id, action, window, age.Round(time.Minute))
+	}
+	return target, nil
+}
+
+// Replace the text of one of our recent text messages.
+func editWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, chat, messageID, text string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false, "New text is required; use delete to remove a message"
+	}
+	chatJID, err := types.ParseJID(chat)
+	if err != nil {
+		return false, fmt.Sprintf("Error parsing chat JID: %v", err)
+	}
+	target, err := loadOwnMessage(messageStore, chatJID, messageID, editWindow, "edit")
+	if err != nil {
+		return false, err.Error()
+	}
+	if target.MediaType != "" {
+		return false, "only text messages can be edited"
+	}
+
+	edit := client.BuildEdit(chatJID, messageID, &waProto.Message{Conversation: proto.String(text)})
+	if _, err := client.SendMessage(context.Background(), chatJID, edit); err != nil {
+		return false, fmt.Sprintf("Error editing message: %v", err)
+	}
+	if err := messageStore.EditMessage(messageID, chatJID.String(), text, time.Now()); err != nil {
+		fmt.Printf("Message edited but not stored: %v\n", err)
+	}
+	return true, fmt.Sprintf("Edited message %s", messageID)
+}
+
+// Delete one of our messages for everyone in the chat.
+func deleteWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, chat, messageID string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+	chatJID, err := types.ParseJID(chat)
+	if err != nil {
+		return false, fmt.Sprintf("Error parsing chat JID: %v", err)
+	}
+	if _, err := loadOwnMessage(messageStore, chatJID, messageID, deleteWindow, "delete"); err != nil {
+		return false, err.Error()
+	}
+
+	revoke := client.BuildRevoke(chatJID, types.EmptyJID, messageID)
+	if _, err := client.SendMessage(context.Background(), chatJID, revoke); err != nil {
+		return false, fmt.Sprintf("Error deleting message: %v", err)
+	}
+	if err := messageStore.DeleteMessage(messageID, chatJID.String()); err != nil {
+		fmt.Printf("Message deleted but not stored: %v\n", err)
+	}
+	return true, fmt.Sprintf("Deleted message %s for everyone", messageID)
 }
 
 // Build the content of an outgoing message, uploading the media first when a
@@ -804,6 +912,7 @@ func buildOutgoingMessage(client *whatsmeow.Client, message string, mediaPath st
 		case whatsmeow.MediaDocument:
 			msg.DocumentMessage = &waProto.DocumentMessage{
 				Title:         proto.String(mediaPath[strings.LastIndex(mediaPath, "/")+1:]),
+				FileName:      proto.String(mediaPath[strings.LastIndex(mediaPath, "/")+1:]),
 				Caption:       proto.String(message),
 				Mimetype:      proto.String(mimeType),
 				URL:           &resp.URL,
@@ -1736,6 +1845,68 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		success, message := sendWhatsAppReaction(client, messageStore, req.ChatJID, req.MessageID, req.Emoji)
 		fmt.Println("Reaction sent", success, message)
+
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(SendMessageResponse{
+			Success: success,
+			Message: message,
+		})
+	})
+
+	// Handler for editing our own messages
+	http.HandleFunc("/api/edit", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req EditMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.ChatJID == "" || req.MessageID == "" {
+			http.Error(w, "Chat JID and message ID are required", http.StatusBadRequest)
+			return
+		}
+
+		success, message := editWhatsAppMessage(client, messageStore, req.ChatJID, req.MessageID, req.Text)
+		fmt.Println("Message edited", success, message)
+
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(SendMessageResponse{
+			Success: success,
+			Message: message,
+		})
+	})
+
+	// Handler for deleting our own messages for everyone
+	http.HandleFunc("/api/delete", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req DeleteMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.ChatJID == "" || req.MessageID == "" {
+			http.Error(w, "Chat JID and message ID are required", http.StatusBadRequest)
+			return
+		}
+
+		success, message := deleteWhatsAppMessage(client, messageStore, req.ChatJID, req.MessageID)
+		fmt.Println("Message deleted", success, message)
 
 		w.Header().Set("Content-Type", "application/json")
 		if !success {

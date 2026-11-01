@@ -83,10 +83,16 @@ func apiPort() (int, error) {
 // e.g. a Tailscale IP, or 0.0.0.0 for every interface, to reach the bridge from
 // another machine.
 func apiHost() string {
-	if host := os.Getenv("WHATSAPP_API_HOST"); host != "" {
+	if host := strings.TrimSpace(os.Getenv("WHATSAPP_API_HOST")); host != "" {
 		return host
 	}
 	return defaultAPIHost
+}
+
+// apiAddr returns the host:port the REST API listens on, bracketing IPv6
+// literals so that e.g. ::1 becomes [::1]:8080.
+func apiAddr(port int) string {
+	return net.JoinHostPort(apiHost(), strconv.Itoa(port))
 }
 
 // Message represents a chat message for our client
@@ -1568,7 +1574,7 @@ func extractDirectPathFromURL(mediaURL string) string {
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, listener net.Listener) {
 	// Handler for getting a group's metadata and member list
 	http.HandleFunc("/api/group/", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow GET requests
@@ -2017,14 +2023,12 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	})
 
 	// Start the server
-	serverAddr := net.JoinHostPort(apiHost(), strconv.Itoa(port))
-	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
+	fmt.Printf("Starting REST API server on %s...\n", listener.Addr())
 
 	// Run server in a goroutine so it doesn't block
 	go func() {
-		if err := http.ListenAndServe(serverAddr, nil); err != nil {
-			// Without the REST API the bridge cannot send messages, and the
-			// usual cause is another bridge already holding this port.
+		if err := http.Serve(listener, nil); err != nil {
+			// Without the REST API the bridge cannot send messages.
 			fmt.Printf("REST API server error: %v\n", err)
 			os.Exit(1)
 		}
@@ -2050,6 +2054,16 @@ func run() int {
 		logger.Errorf("%v", err)
 		return 1
 	}
+
+	// Bind the REST API before connecting to WhatsApp, so a bad
+	// WHATSAPP_API_HOST, an address that is not up yet, or a port held by
+	// another bridge fails fast instead of after a full login.
+	listener, err := net.Listen("tcp", apiAddr(port))
+	if err != nil {
+		logger.Errorf("Failed to listen on %s: %v", apiAddr(port), err)
+		return 1
+	}
+	defer listener.Close()
 
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
@@ -2168,7 +2182,7 @@ func run() int {
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
 	// Start REST API server
-	startRESTServer(client, messageStore, port)
+	startRESTServer(client, messageStore, listener)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

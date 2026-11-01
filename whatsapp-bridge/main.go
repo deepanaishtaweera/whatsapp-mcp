@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -41,6 +42,11 @@ import (
 // Default REST API port, used when WHATSAPP_API_PORT is unset.
 const defaultAPIPort = 8080
 
+// Default REST API host, used when WHATSAPP_API_HOST is unset. The API has no
+// authentication, so it only accepts connections from this machine unless a
+// wider address is asked for explicitly.
+const defaultAPIHost = "127.0.0.1"
+
 // storeDir returns the directory holding this account's session database,
 // message database and downloaded media. Running one bridge per WhatsApp
 // number means giving each process its own WHATSAPP_STORE_DIR.
@@ -71,6 +77,16 @@ func apiPort() (int, error) {
 		return 0, fmt.Errorf("invalid WHATSAPP_API_PORT %q: must be a number between 1 and 65535", raw)
 	}
 	return port, nil
+}
+
+// apiHost returns the address the REST API binds to. Set WHATSAPP_API_HOST to
+// e.g. a Tailscale IP, or 0.0.0.0 for every interface, to reach the bridge from
+// another machine.
+func apiHost() string {
+	if host := os.Getenv("WHATSAPP_API_HOST"); host != "" {
+		return host
+	}
+	return defaultAPIHost
 }
 
 // Message represents a chat message for our client
@@ -2001,7 +2017,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	})
 
 	// Start the server
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
+	serverAddr := net.JoinHostPort(apiHost(), strconv.Itoa(port))
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	// Run server in a goroutine so it doesn't block

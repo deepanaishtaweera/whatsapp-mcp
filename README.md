@@ -92,6 +92,7 @@ Each WhatsApp number needs its own bridge process and its own MCP server entry. 
 | --- | --- | --- |
 | `WHATSAPP_STORE_DIR` | `store` | Session database, message database and downloaded media for this account. An absolute path is recommended — see the note below. |
 | `WHATSAPP_API_PORT` | `8080` | Port the bridge's REST API listens on. Must be unique per running bridge. |
+| `WHATSAPP_API_HOST` | `127.0.0.1` | Address the bridge's REST API binds to (bridge only). The API has no authentication; set a Tailscale IP or `0.0.0.0` only if another machine must reach it. |
 
 Give both processes for one account the same values.
 

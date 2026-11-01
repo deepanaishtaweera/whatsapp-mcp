@@ -745,6 +745,16 @@ def get_group_participants(chat_jid: str) -> Tuple[bool, str, Optional[GroupInfo
 def _bridge_error(response) -> str:
     return f"Error: HTTP {response.status_code} - {response.text.strip()}"
 
+def _bridge_result(response) -> Tuple[bool, str]:
+    """Read a bridge send response. Failed sends still carry a JSON message."""
+    try:
+        result = response.json()
+    except ValueError:
+        return False, _bridge_error(response)
+    if response.status_code != 200 and not result.get("message"):
+        return False, _bridge_error(response)
+    return response.status_code == 200 and result.get("success", False), result.get("message", "Unknown response")
+
 def check_whatsapp_numbers(phone_numbers: List[str]) -> Dict[str, Any]:
     """Ask the bridge which phone numbers are registered on WhatsApp."""
     try:
@@ -792,7 +802,7 @@ def get_contact_info(contact: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         return {"success": False, "message": f"Error parsing response: {response.text}"}
 
-def send_message(recipient: str, message: str) -> Tuple[bool, str]:
+def send_message(recipient: str, message: str, reply_to: Optional[str] = None) -> Tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
@@ -803,15 +813,11 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
             "recipient": recipient,
             "message": message,
         }
+        if reply_to:
+            payload["reply_to"] = reply_to
         
         response = requests.post(url, json=payload)
-        
-        # Check if the request was successful
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
+        return _bridge_result(response)
             
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
@@ -820,7 +826,7 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
-def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
+def send_file(recipient: str, media_path: str, reply_to: Optional[str] = None) -> Tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
@@ -837,15 +843,11 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
             "recipient": recipient,
             "media_path": media_path
         }
+        if reply_to:
+            payload["reply_to"] = reply_to
         
         response = requests.post(url, json=payload)
-        
-        # Check if the request was successful
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
+        return _bridge_result(response)
             
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
@@ -853,6 +855,22 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
         return False, f"Error parsing response: {response.text}"
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
+
+def send_reaction(chat_jid: str, message_id: str, emoji: str) -> Tuple[bool, str]:
+    """React to a message, or remove our reaction when emoji is empty."""
+    try:
+        if not chat_jid or not message_id:
+            return False, "Chat JID and message ID must be provided"
+
+        response = requests.post(
+            f"{WHATSAPP_API_BASE_URL}/react",
+            json={"chat_jid": chat_jid, "message_id": message_id, "emoji": emoji.strip()},
+            timeout=60,
+        )
+        return _bridge_result(response)
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
 
 def send_status(message: str = "", media_path: Optional[str] = None, background_color: Optional[str] = None) -> Tuple[bool, str]:
     try:

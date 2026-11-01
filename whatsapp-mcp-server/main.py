@@ -14,6 +14,7 @@ from whatsapp import (
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
     send_status as whatsapp_send_status,
+    send_reaction as whatsapp_send_reaction,
     check_whatsapp_numbers as whatsapp_check_whatsapp_numbers,
     get_contact_info as whatsapp_get_contact_info,
     download_media as whatsapp_download_media
@@ -238,7 +239,8 @@ def get_contact_info(contact: str) -> Dict[str, Any]:
 @mcp.tool()
 def send_message(
     recipient: str,
-    message: str
+    message: str,
+    reply_to: Optional[str] = None
 ) -> Dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
@@ -246,7 +248,9 @@ def send_message(
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         message: The message text to send
-    
+        reply_to: Optional ID of a message to reply to, as shown by list_messages. When replying,
+                 use that message's chat JID as the recipient.
+
     Returns:
         A dictionary containing success status and a status message
     """
@@ -258,27 +262,47 @@ def send_message(
         }
     
     # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message)
+    success, status_message = whatsapp_send_message(recipient, message, reply_to)
     return {
         "success": success,
         "message": status_message
     }
 
 @mcp.tool()
-def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
+def send_file(recipient: str, media_path: str, reply_to: Optional[str] = None) -> Dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
-    
+
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         media_path: The absolute path to the media file to send (image, video, document)
-    
+        reply_to: Optional ID of a message to reply to, as shown by list_messages. When replying,
+                 use that message's chat JID as the recipient.
+
     Returns:
         A dictionary containing success status and a status message
     """
-    
+
     # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path)
+    success, status_message = whatsapp_send_file(recipient, media_path, reply_to)
+    return {
+        "success": success,
+        "message": status_message
+    }
+
+@mcp.tool()
+def send_reaction(chat_jid: str, message_id: str, emoji: str) -> Dict[str, Any]:
+    """React to a WhatsApp message with an emoji, or remove your reaction.
+
+    Args:
+        chat_jid: The JID of the chat the message is in, as shown by list_messages
+        message_id: The ID of the message to react to
+        emoji: A single emoji such as "👍". Pass an empty string to remove your reaction.
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, status_message = whatsapp_send_reaction(chat_jid, message_id, emoji)
     return {
         "success": success,
         "message": status_message

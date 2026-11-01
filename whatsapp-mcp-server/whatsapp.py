@@ -11,7 +11,8 @@ import audio
 
 # One bridge process serves one WhatsApp number, so a second number means a
 # second bridge with its own store directory and port. These must match the
-# WHATSAPP_STORE_DIR / WHATSAPP_API_PORT given to the bridge for this account.
+# WHATSAPP_STORE_DIR / WHATSAPP_API_PORT / WHATSAPP_API_HOST given to the
+# bridge for this account.
 BRIDGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge')
 
 
@@ -36,7 +37,13 @@ def _resolve_api_base_url() -> str:
     if base_url:
         return base_url.rstrip('/')
     port = os.environ.get('WHATSAPP_API_PORT', '8080')
-    return f"http://localhost:{port}/api"
+    host = os.environ.get('WHATSAPP_API_HOST', '').strip()
+    # A wildcard bind still accepts loopback connections.
+    if host in ('', '0.0.0.0', '::'):
+        host = 'localhost'
+    elif ':' in host:
+        host = f'[{host}]'
+    return f"http://{host}:{port}/api"
 
 
 MESSAGES_DB_PATH = os.environ.get('WHATSAPP_DB_PATH') or os.path.join(_resolve_store_dir(), 'messages.db')

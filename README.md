@@ -86,12 +86,13 @@ Here's an example of what you can do when it's connected to Claude.
 
 ### Using Multiple WhatsApp Numbers
 
-Each WhatsApp number needs its own bridge process and its own MCP server entry. Two environment variables, read by both processes, keep the accounts apart:
+Each WhatsApp number needs its own bridge process and its own MCP server entry. These environment variables, read by both processes, keep the accounts apart:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `WHATSAPP_STORE_DIR` | `store` | Session database, message database and downloaded media for this account. An absolute path is recommended — see the note below. |
 | `WHATSAPP_API_PORT` | `8080` | Port the bridge's REST API listens on. Must be unique per running bridge. |
+| `WHATSAPP_API_HOST` | `127.0.0.1` | Address the bridge's REST API binds to; the MCP server connects to it (`localhost` for `0.0.0.0`/`::`). The API has no authentication, so set a Tailscale IP or `0.0.0.0` only if another machine must reach it. The address must exist when the bridge starts, or it exits before logging in; run it under a supervisor that restarts it (e.g. systemd `Restart=always`) if it can start before Tailscale is up. |
 
 Give both processes for one account the same values.
 

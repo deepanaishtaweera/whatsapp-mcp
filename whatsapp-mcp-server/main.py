@@ -15,6 +15,15 @@ from whatsapp import (
     send_audio_message as whatsapp_audio_voice_message,
     send_status as whatsapp_send_status,
     send_reaction as whatsapp_send_reaction,
+    create_group as whatsapp_create_group,
+    update_group_participants as whatsapp_update_group_participants,
+    update_group as whatsapp_update_group,
+    get_group_invite_link as whatsapp_get_group_invite_link,
+    leave_group as whatsapp_leave_group,
+    join_group as whatsapp_join_group,
+    create_poll as whatsapp_create_poll,
+    vote_poll as whatsapp_vote_poll,
+    get_poll_results as whatsapp_get_poll_results,
     edit_message as whatsapp_edit_message,
     delete_message as whatsapp_delete_message,
     check_whatsapp_numbers as whatsapp_check_whatsapp_numbers,
@@ -364,6 +373,130 @@ def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
         "success": success,
         "message": status_message
     }
+
+@mcp.tool()
+def create_group(name: str, participants: List[str]) -> Dict[str, Any]:
+    """Create a WhatsApp group with you as its admin.
+
+    Args:
+        name: The group name, up to 25 characters
+        participants: Phone numbers with country code (e.g. "+94771234567") or JIDs of the people to add
+
+    Returns:
+        A dictionary with the new group's JID and, for each participant, whether they were added.
+        People whose privacy settings block being added are offered an invite by WhatsApp instead.
+    """
+    return whatsapp_create_group(name, participants)
+
+@mcp.tool()
+def update_group_participants(group_jid: str, participants: List[str], action: str) -> Dict[str, Any]:
+    """Add or remove group members, or make them admins or not. You must be a group admin.
+
+    Args:
+        group_jid: The group's JID (ends in @g.us), as returned by list_chats
+        participants: Phone numbers with country code or JIDs of the members to change
+        action: "add", "remove", "promote" (make admin) or "demote" (remove admin)
+
+    Returns:
+        A dictionary with, for each participant, whether the change worked and why not
+    """
+    return whatsapp_update_group_participants(group_jid, participants, action)
+
+@mcp.tool()
+def update_group(group_jid: str, name: Optional[str] = None, description: Optional[str] = None) -> Dict[str, Any]:
+    """Rename a group or change its description. Leave out what shouldn't change;
+    an empty description clears it.
+
+    Args:
+        group_jid: The group's JID (ends in @g.us), as returned by list_chats
+        name: Optional new group name, up to 25 characters
+        description: Optional new group description
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    return whatsapp_update_group(group_jid, name, description)
+
+@mcp.tool()
+def get_group_invite_link(group_jid: str, reset: bool = False) -> Dict[str, Any]:
+    """Get a group's invite link. Only group admins can do this.
+
+    Args:
+        group_jid: The group's JID (ends in @g.us), as returned by list_chats
+        reset: Set to true to replace the link with a new one, so the old link stops working
+
+    Returns:
+        A dictionary with the invite link
+    """
+    return whatsapp_get_group_invite_link(group_jid, reset)
+
+@mcp.tool()
+def leave_group(group_jid: str) -> Dict[str, Any]:
+    """Leave a WhatsApp group. Ask the user to confirm first: rejoining needs an invite.
+
+    Args:
+        group_jid: The group's JID (ends in @g.us), as returned by list_chats
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    return whatsapp_leave_group(group_jid)
+
+@mcp.tool()
+def join_group(invite_link: str) -> Dict[str, Any]:
+    """Join a WhatsApp group using an invite link.
+
+    Args:
+        invite_link: A link like "https://chat.whatsapp.com/AbCdEf123", or just the code at its end
+
+    Returns:
+        A dictionary with the group's JID and name
+    """
+    return whatsapp_join_group(invite_link)
+
+@mcp.tool()
+def create_poll(recipient: str, question: str, options: List[str], multiple_answers: bool = False) -> Dict[str, Any]:
+    """Send a poll to a person or group.
+
+    Args:
+        recipient: A phone number with country code but no + or other symbols, or a JID
+                 (e.g. "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
+        question: The poll question
+        options: 2 to 12 distinct answers
+        multiple_answers: Set to true to let people pick more than one answer
+
+    Returns:
+        A dictionary containing success status and a status message with the poll's message ID
+    """
+    return whatsapp_create_poll(recipient, question, options, multiple_answers)
+
+@mcp.tool()
+def vote_poll(chat_jid: str, message_id: str, options: List[str]) -> Dict[str, Any]:
+    """Vote on a poll, replacing any earlier vote. Pass an empty list to take your vote back.
+
+    Args:
+        chat_jid: The JID of the chat the poll is in, as shown by list_messages
+        message_id: The poll's message ID, as shown by list_messages
+        options: The answers to choose, spelled exactly as in the poll
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    return whatsapp_vote_poll(chat_jid, message_id, options)
+
+@mcp.tool()
+def get_poll_results(chat_jid: str, message_id: str) -> Dict[str, Any]:
+    """Get the current votes on a poll: the count for each answer and who chose it.
+    Votes are counted from what the bridge has received since it was linked.
+
+    Args:
+        chat_jid: The JID of the chat the poll is in, as shown by list_messages
+        message_id: The poll's message ID, as shown by list_messages
+
+    Returns:
+        A dictionary with the question, the number of voters, and each option's votes
+    """
+    return whatsapp_get_poll_results(chat_jid, message_id)
 
 @mcp.tool()
 def send_status(

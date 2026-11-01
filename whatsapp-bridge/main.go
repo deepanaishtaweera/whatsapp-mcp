@@ -31,6 +31,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waMmsRetry"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -157,6 +158,24 @@ func NewMessageStore() (*MessageStore, error) {
 			emoji TEXT,
 			timestamp TIMESTAMP,
 			PRIMARY KEY (message_id, chat_jid, sender)
+		);
+
+		CREATE TABLE IF NOT EXISTS polls (
+			message_id TEXT,
+			chat_jid TEXT,
+			question TEXT,
+			options TEXT,
+			selectable_count INTEGER,
+			PRIMARY KEY (message_id, chat_jid)
+		);
+
+		CREATE TABLE IF NOT EXISTS poll_votes (
+			poll_id TEXT,
+			chat_jid TEXT,
+			voter TEXT,
+			options TEXT,
+			timestamp TIMESTAMP,
+			PRIMARY KEY (poll_id, chat_jid, voter)
 		);
 	`)
 	if err != nil {
@@ -416,6 +435,11 @@ func extractTextContent(msg *waProto.Message) string {
 		return doc.GetCaption()
 	}
 
+	// A poll's text is its question; the options are stored with the poll
+	if poll := extractPoll(msg); poll != nil {
+		return poll.GetName()
+	}
+
 	return ""
 }
 
@@ -667,25 +691,9 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		return false, "Not connected to WhatsApp"
 	}
 
-	// Create JID for recipient
-	var recipientJID types.JID
-	var err error
-
-	// Check if recipient is a JID
-	isJID := strings.Contains(recipient, "@")
-
-	if isJID {
-		// Parse the JID string
-		recipientJID, err = types.ParseJID(recipient)
-		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
-		}
-	} else {
-		// Create JID from phone number
-		recipientJID = types.JID{
-			User:   recipient,
-			Server: "s.whatsapp.net", // For personal chats
-		}
+	recipientJID, err := parseRecipient(recipient)
+	if err != nil {
+		return false, err.Error()
 	}
 
 	// Look up the message being replied to before uploading any media
@@ -725,6 +733,31 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	return true, fmt.Sprintf("Message sent to %s (ID: %s)", recipient, resp.ID)
 }
 
+// A recipient is a JID, or a phone number for a direct chat.
+func parseRecipient(recipient string) (types.JID, error) {
+	if strings.Contains(recipient, "@") {
+		jid, err := types.ParseJID(recipient)
+		if err != nil {
+			return types.JID{}, fmt.Errorf("Error parsing JID: %v", err)
+		}
+		return jid, nil
+	}
+	return types.NewJID(recipient, types.DefaultUserServer), nil
+}
+
+// Who did something to a message in a history sync, from the key of their
+// reaction or vote: us, a group participant, or the other person in a
+// direct chat.
+func historyActor(client *whatsmeow.Client, chat types.JID, key *waCommon.MessageKey) string {
+	if key.GetFromMe() {
+		return client.Store.ID.User
+	}
+	if participant := key.GetParticipant(); participant != "" {
+		return jidUser(participant)
+	}
+	return chat.User
+}
+
 // Save a message we sent. Our own messages don't come back as events, so
 // without this they would only appear after a history sync.
 func storeSentMessage(messageStore *MessageStore, chat types.JID, chatName, sender, id string, timestamp time.Time, msg *waProto.Message) error {
@@ -733,8 +766,12 @@ func storeSentMessage(messageStore *MessageStore, chat types.JID, chatName, send
 		return err
 	}
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg)
-	return messageStore.StoreMessage(id, chatJID, sender, extractTextContent(msg), timestamp, true,
+	err := messageStore.StoreMessage(id, chatJID, sender, extractTextContent(msg), timestamp, true,
 		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, extractQuotedMessage(msg))
+	if err != nil {
+		return err
+	}
+	return storePollIfAny(messageStore, msg, id, chatJID)
 }
 
 // How long WhatsApp lets you edit a message, or delete it for everyone
@@ -1205,6 +1242,14 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	chatJID := msg.Info.Chat.String()
 	sender := msg.Info.Sender.User
 
+	// Poll votes are encrypted with the poll's secret, so they need the client
+	if msg.Message.GetPollUpdateMessage() != nil {
+		if err := storeLivePollVote(client, messageStore, msg); err != nil {
+			logger.Warnf("Failed to store poll vote: %v", err)
+		}
+		return
+	}
+
 	// Reactions, edits and deletions update an earlier message, so they
 	// neither add a message nor move the chat to the top
 	if handled, err := applyMessageUpdate(messageStore, msg.Message, chatJID, sender, msg.Info.Timestamp); handled {
@@ -1252,6 +1297,9 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		extractQuotedMessage(msg.Message),
 	)
 
+	if err == nil {
+		err = storePollIfAny(messageStore, msg.Message, msg.Info.ID, chatJID)
+	}
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
 	} else {
@@ -1940,6 +1988,9 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, liste
 		})
 	})
 
+	registerGroupHandlers(client, messageStore)
+	registerPollHandlers(client, messageStore)
+
 	// Handler for posting status updates
 	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -2387,12 +2438,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 
 				// Reactions to this message are synced alongside it
 				for _, reaction := range msg.Message.GetReactions() {
-					reactor := jid.User
-					if reaction.GetKey().GetFromMe() {
-						reactor = client.Store.ID.User
-					} else if participant := reaction.GetKey().GetParticipant(); participant != "" {
-						reactor = jidUser(participant)
-					}
+					reactor := historyActor(client, jid, reaction.GetKey())
 					reactedAt := time.UnixMilli(reaction.GetSenderTimestampMS())
 					if err := messageStore.StoreReaction(msgID, chatJID, reactor, reaction.GetText(), reactedAt); err != nil {
 						logger.Warnf("Failed to store history reaction: %v", err)
@@ -2427,6 +2473,19 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					fileLength,
 					extractQuotedMessage(waMsg),
 				)
+				if err == nil {
+					err = storePollIfAny(messageStore, waMsg, msgID, chatJID)
+				}
+				if err == nil {
+					// Votes on a poll are synced alongside it, already decrypted
+					for _, update := range msg.Message.GetPollUpdates() {
+						voter := historyActor(client, jid, update.GetPollUpdateMessageKey())
+						votedAt := time.UnixMilli(update.GetSenderTimestampMS())
+						if voteErr := storePollVote(messageStore, msgID, chatJID, voter, update.GetVote(), votedAt); voteErr != nil {
+							logger.Warnf("Failed to store history poll vote: %v", voteErr)
+						}
+					}
+				}
 				if err != nil {
 					logger.Warnf("Failed to store history message: %v", err)
 				} else {

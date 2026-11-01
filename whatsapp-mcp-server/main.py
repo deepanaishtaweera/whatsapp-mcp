@@ -15,6 +15,8 @@ from whatsapp import (
     send_audio_message as whatsapp_audio_voice_message,
     send_status as whatsapp_send_status,
     send_reaction as whatsapp_send_reaction,
+    edit_message as whatsapp_edit_message,
+    delete_message as whatsapp_delete_message,
     check_whatsapp_numbers as whatsapp_check_whatsapp_numbers,
     get_contact_info as whatsapp_get_contact_info,
     download_media as whatsapp_download_media
@@ -252,7 +254,7 @@ def send_message(
                  use that message's chat JID as the recipient.
 
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary containing success status and a status message with the sent message's ID
     """
     # Validate input
     if not recipient:
@@ -280,7 +282,7 @@ def send_file(recipient: str, media_path: str, reply_to: Optional[str] = None) -
                  use that message's chat JID as the recipient.
 
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary containing success status and a status message with the sent message's ID
     """
 
     # Call the whatsapp_send_file function
@@ -303,6 +305,43 @@ def send_reaction(chat_jid: str, message_id: str, emoji: str) -> Dict[str, Any]:
         A dictionary containing success status and a status message
     """
     success, status_message = whatsapp_send_reaction(chat_jid, message_id, emoji)
+    return {
+        "success": success,
+        "message": status_message
+    }
+
+@mcp.tool()
+def edit_message(chat_jid: str, message_id: str, text: str) -> Dict[str, Any]:
+    """Edit the text of a message you sent. WhatsApp only allows editing text messages
+    within 15 minutes of sending them.
+
+    Args:
+        chat_jid: The JID of the chat the message is in, as shown by list_messages
+        message_id: The ID of your message, as shown by list_messages or returned by send_message
+        text: The new text of the message
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, status_message = whatsapp_edit_message(chat_jid, message_id, text)
+    return {
+        "success": success,
+        "message": status_message
+    }
+
+@mcp.tool()
+def delete_message(chat_jid: str, message_id: str) -> Dict[str, Any]:
+    """Delete a message you sent for everyone in the chat. WhatsApp only allows this for
+    about 2.5 days after sending. This cannot be undone.
+
+    Args:
+        chat_jid: The JID of the chat the message is in, as shown by list_messages
+        message_id: The ID of your message, as shown by list_messages or returned by send_message
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, status_message = whatsapp_delete_message(chat_jid, message_id)
     return {
         "success": success,
         "message": status_message

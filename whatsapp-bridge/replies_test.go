@@ -26,6 +26,10 @@ func TestGetMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMessage: %v", err)
 	}
+	if !got.Timestamp.Equal(time.Unix(1000, 0)) {
+		t.Errorf("GetMessage timestamp = %v, want %v", got.Timestamp, time.Unix(1000, 0))
+	}
+	got.Timestamp = time.Time{}
 	want := StoredMessage{Sender: "123", IsFromMe: true, Content: "the invoice", MediaType: "document", Filename: "invoice.pdf"}
 	if got != want {
 		t.Errorf("GetMessage = %+v, want %+v", got, want)

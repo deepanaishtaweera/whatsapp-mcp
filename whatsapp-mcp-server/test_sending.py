@@ -63,5 +63,40 @@ class ReactionTests(unittest.TestCase):
         self.assertFalse(whatsapp.send_reaction("", "m1", "👍")[0])
         self.assertFalse(whatsapp.send_reaction("123@s.whatsapp.net", "", "👍")[0])
 
+class EditDeleteTests(unittest.TestCase):
+    def test_edit_payload(self):
+        ok = bridge_response(200, {"success": True, "message": "Edited message s1"})
+        with patch.object(whatsapp.requests, "post", return_value=ok) as post:
+            success, _ = whatsapp.edit_message("123@s.whatsapp.net", "s1", "see you at 7")
+        self.assertTrue(success)
+        self.assertTrue(post.call_args.args[0].endswith("/edit"))
+        self.assertEqual(post.call_args.kwargs["json"],
+                         {"chat_jid": "123@s.whatsapp.net", "message_id": "s1", "text": "see you at 7"})
+
+    def test_edit_requires_text(self):
+        with patch.object(whatsapp.requests, "post") as post:
+            success, _ = whatsapp.edit_message("123@s.whatsapp.net", "s1", "  ")
+        self.assertFalse(success)
+        post.assert_not_called()
+
+    def test_edit_too_old_is_explained(self):
+        failed = bridge_response(500, {"success": False, "message": "message s1 is too old to edit"})
+        with patch.object(whatsapp.requests, "post", return_value=failed):
+            success, message = whatsapp.edit_message("123@s.whatsapp.net", "s1", "fixed")
+        self.assertFalse(success)
+        self.assertEqual(message, "message s1 is too old to edit")
+
+    def test_delete_payload(self):
+        ok = bridge_response(200, {"success": True, "message": "Deleted message s1 for everyone"})
+        with patch.object(whatsapp.requests, "post", return_value=ok) as post:
+            success, _ = whatsapp.delete_message("123@s.whatsapp.net", "s1")
+        self.assertTrue(success)
+        self.assertTrue(post.call_args.args[0].endswith("/delete"))
+        self.assertEqual(post.call_args.kwargs["json"], {"chat_jid": "123@s.whatsapp.net", "message_id": "s1"})
+
+    def test_delete_requires_ids(self):
+        self.assertFalse(whatsapp.delete_message("", "s1")[0])
+        self.assertFalse(whatsapp.delete_message("123@s.whatsapp.net", "")[0])
+
 if __name__ == '__main__':
     unittest.main()

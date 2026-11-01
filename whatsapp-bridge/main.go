@@ -20,6 +20,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
@@ -289,6 +291,38 @@ func (store *MessageStore) DeleteMessage(id, chatJID string) error {
 	return err
 }
 
+// A stored message that an outgoing reply or reaction refers to
+type StoredMessage struct {
+	Sender    string
+	IsFromMe  bool
+	Content   string
+	MediaType string
+	Filename  string
+	IsDeleted bool
+}
+
+// Get one stored message. Returns sql.ErrNoRows when the chat has no such message.
+func (store *MessageStore) GetMessage(id, chatJID string) (StoredMessage, error) {
+	var msg StoredMessage
+	err := store.db.QueryRow(
+		`SELECT COALESCE(sender, ''), is_from_me, COALESCE(content, ''), COALESCE(media_type, ''),
+			COALESCE(filename, ''), is_deleted
+		FROM messages WHERE id = ? AND chat_jid = ?`,
+		id, chatJID,
+	).Scan(&msg.Sender, &msg.IsFromMe, &msg.Content, &msg.MediaType, &msg.Filename, &msg.IsDeleted)
+	return msg, err
+}
+
+// Find which chat a message ID was stored in, or "" if none.
+func (store *MessageStore) FindMessageChat(id string) (string, error) {
+	var chatJID string
+	err := store.db.QueryRow("SELECT chat_jid FROM messages WHERE id = ? LIMIT 1", id).Scan(&chatJID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return chatJID, err
+}
+
 // Get messages from a chat
 func (store *MessageStore) GetMessages(chatJID string, limit int) ([]Message, error) {
 	rows, err := store.db.Query(
@@ -459,6 +493,15 @@ type SendMessageRequest struct {
 	Recipient string `json:"recipient"`
 	Message   string `json:"message"`
 	MediaPath string `json:"media_path,omitempty"`
+	ReplyTo   string `json:"reply_to,omitempty"`
+}
+
+// SendReactionRequest represents the request body for the reaction API. An
+// empty emoji removes our reaction.
+type SendReactionRequest struct {
+	ChatJID   string `json:"chat_jid"`
+	MessageID string `json:"message_id"`
+	Emoji     string `json:"emoji"`
 }
 
 // PostStatusRequest represents the request body for the post status API
@@ -583,7 +626,7 @@ func resolveParticipantName(ctx context.Context, client *whatsmeow.Client, parti
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, replyTo string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -609,9 +652,25 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 		}
 	}
 
+	// Look up the message being replied to before uploading any media
+	var reply *waProto.ContextInfo
+	if replyTo != "" {
+		target, err := loadTargetMessage(messageStore, recipientJID, replyTo)
+		if err != nil {
+			return false, err.Error()
+		}
+		reply, err = replyContext(context.Background(), client, recipientJID, replyTo, target)
+		if err != nil {
+			return false, err.Error()
+		}
+	}
+
 	msg, err := buildOutgoingMessage(client, message, mediaPath)
 	if err != nil {
 		return false, err.Error()
+	}
+	if reply != nil {
+		attachReplyContext(msg, reply)
 	}
 
 	// Send message
@@ -760,6 +819,150 @@ func buildOutgoingMessage(client *whatsmeow.Client, message string, mediaPath st
 	}
 
 	return msg, nil
+}
+
+// Look up the message a reply or reaction refers to. A message stored under
+// another chat gets an error naming that chat, since a phone number and the
+// chat's JID can differ (for example a chat addressed by hidden ID).
+func loadTargetMessage(messageStore *MessageStore, chatJID types.JID, id string) (StoredMessage, error) {
+	target, err := messageStore.GetMessage(id, chatJID.String())
+	if err == sql.ErrNoRows {
+		if other, _ := messageStore.FindMessageChat(id); other != "" {
+			return StoredMessage{}, fmt.Errorf("message %s is in chat %s, not %s; use that chat JID", id, other, chatJID)
+		}
+		return StoredMessage{}, fmt.Errorf("message %s not found in chat %s", id, chatJID)
+	}
+	if err != nil {
+		return StoredMessage{}, fmt.Errorf("Error loading message %s: %v", id, err)
+	}
+	if target.IsDeleted {
+		return StoredMessage{}, fmt.Errorf("message %s was deleted", id)
+	}
+	return target, nil
+}
+
+// Our own JID as it appears in a chat: chats addressed by hidden ID (LID)
+// see us by our LID, everything else by our phone number.
+func ownJIDFor(client *whatsmeow.Client, chat types.JID) types.JID {
+	if lid := client.Store.GetLID(); chat.Server == types.HiddenUserServer && !lid.IsEmpty() {
+		return lid.ToNonAD()
+	}
+	return client.Store.GetJID().ToNonAD()
+}
+
+// The full JID of a stored message's sender. In a direct chat the other
+// person is the chat itself.
+func targetSenderJID(ctx context.Context, client *whatsmeow.Client, chat types.JID, target StoredMessage) (types.JID, error) {
+	switch {
+	case target.IsFromMe:
+		return ownJIDFor(client, chat), nil
+	case chat.Server == types.DefaultUserServer || chat.Server == types.HiddenUserServer:
+		return chat.ToNonAD(), nil
+	}
+	return resolveSenderJID(ctx, client, target.Sender)
+}
+
+// Build the reply context that quotes a stored message. Only the text and
+// media type of the original are stored, so quoted media has no thumbnail.
+func replyContext(ctx context.Context, client *whatsmeow.Client, chat types.JID, id string, target StoredMessage) (*waProto.ContextInfo, error) {
+	sender, err := targetSenderJID(ctx, client, chat, target)
+	if err != nil {
+		return nil, fmt.Errorf("Error resolving sender of message %s: %v", id, err)
+	}
+	return &waProto.ContextInfo{
+		StanzaID:      proto.String(id),
+		Participant:   proto.String(sender.String()),
+		QuotedMessage: quotedMessageStub(target),
+	}, nil
+}
+
+// Rebuild enough of a stored message for WhatsApp to show it as quoted.
+func quotedMessageStub(target StoredMessage) *waProto.Message {
+	switch target.MediaType {
+	case "image":
+		return &waProto.Message{ImageMessage: &waProto.ImageMessage{Caption: proto.String(target.Content)}}
+	case "video":
+		return &waProto.Message{VideoMessage: &waProto.VideoMessage{Caption: proto.String(target.Content)}}
+	case "audio":
+		return &waProto.Message{AudioMessage: &waProto.AudioMessage{}}
+	case "document":
+		return &waProto.Message{DocumentMessage: &waProto.DocumentMessage{
+			Caption:  proto.String(target.Content),
+			FileName: proto.String(target.Filename),
+		}}
+	}
+	return &waProto.Message{Conversation: proto.String(target.Content)}
+}
+
+// Attach reply context to outgoing content. Plain text can't carry context,
+// so it becomes an extended text message.
+func attachReplyContext(msg *waProto.Message, ci *waProto.ContextInfo) {
+	switch {
+	case msg.Conversation != nil:
+		msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{Text: msg.Conversation, ContextInfo: ci}
+		msg.Conversation = nil
+	case msg.ImageMessage != nil:
+		msg.ImageMessage.ContextInfo = ci
+	case msg.VideoMessage != nil:
+		msg.VideoMessage.ContextInfo = ci
+	case msg.AudioMessage != nil:
+		msg.AudioMessage.ContextInfo = ci
+	case msg.DocumentMessage != nil:
+		msg.DocumentMessage.ContextInfo = ci
+	}
+}
+
+// Reactions are emoji. Reject words like "thumbs up" that WhatsApp would
+// accept but no client can show.
+func validateReaction(emoji string) error {
+	if utf8.RuneCountInString(emoji) > 10 {
+		return fmt.Errorf("reaction must be a single emoji")
+	}
+	for _, r := range emoji {
+		// Digits are allowed for keycap emoji such as 1️⃣
+		if r < utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsSpace(r)) {
+			return fmt.Errorf("reaction must be an emoji, got %q", emoji)
+		}
+	}
+	return nil
+}
+
+// React to a stored message, or remove our reaction when emoji is empty.
+func sendWhatsAppReaction(client *whatsmeow.Client, messageStore *MessageStore, chat string, messageID string, emoji string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+	if err := validateReaction(emoji); err != nil {
+		return false, err.Error()
+	}
+	chatJID, err := types.ParseJID(chat)
+	if err != nil {
+		return false, fmt.Sprintf("Error parsing chat JID: %v", err)
+	}
+
+	target, err := loadTargetMessage(messageStore, chatJID, messageID)
+	if err != nil {
+		return false, err.Error()
+	}
+	sender := types.EmptyJID
+	if !target.IsFromMe {
+		if sender, err = targetSenderJID(context.Background(), client, chatJID, target); err != nil {
+			return false, fmt.Sprintf("Error resolving sender of message %s: %v", messageID, err)
+		}
+	}
+
+	if _, err := client.SendMessage(context.Background(), chatJID, client.BuildReaction(chatJID, sender, messageID, emoji)); err != nil {
+		return false, fmt.Sprintf("Error sending reaction: %v", err)
+	}
+
+	// Our own reactions don't come back as events, so record it here
+	if err := messageStore.StoreReaction(messageID, chatJID.String(), ownJIDFor(client, chatJID).User, emoji, time.Now()); err != nil {
+		fmt.Printf("Reaction sent but not stored: %v\n", err)
+	}
+	if emoji == "" {
+		return true, fmt.Sprintf("Removed reaction from message %s", messageID)
+	}
+	return true, fmt.Sprintf("Reacted %s to message %s", emoji, messageID)
 }
 
 // Background of a text status when none is given: WhatsApp's dark teal (ARGB)
@@ -1496,7 +1699,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath, req.ReplyTo)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -1507,6 +1710,37 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		}
 
 		// Send response
+		json.NewEncoder(w).Encode(SendMessageResponse{
+			Success: success,
+			Message: message,
+		})
+	})
+
+	// Handler for reacting to messages
+	http.HandleFunc("/api/react", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req SendReactionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.ChatJID == "" || req.MessageID == "" {
+			http.Error(w, "Chat JID and message ID are required", http.StatusBadRequest)
+			return
+		}
+
+		success, message := sendWhatsAppReaction(client, messageStore, req.ChatJID, req.MessageID, req.Emoji)
+		fmt.Println("Reaction sent", success, message)
+
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
 		json.NewEncoder(w).Encode(SendMessageResponse{
 			Success: success,
 			Message: message,

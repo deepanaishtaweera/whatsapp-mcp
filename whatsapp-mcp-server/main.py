@@ -26,6 +26,7 @@ from whatsapp import (
     get_poll_results as whatsapp_get_poll_results,
     edit_message as whatsapp_edit_message,
     delete_message as whatsapp_delete_message,
+    mark_as_read as whatsapp_mark_as_read,
     check_whatsapp_numbers as whatsapp_check_whatsapp_numbers,
     get_contact_info as whatsapp_get_contact_info,
     download_media as whatsapp_download_media
@@ -91,9 +92,12 @@ def list_chats(
     limit: int = 20,
     page: int = 0,
     include_last_message: bool = True,
-    sort_by: str = "last_active"
+    sort_by: str = "last_active",
+    unread_only: bool = False
 ) -> List[Dict[str, Any]]:
-    """Get WhatsApp chats matching specified criteria.
+    """Get WhatsApp chats matching specified criteria. Each chat has unread_count, the
+    number of messages from others since you last read it, and marked_unread, whether
+    it was marked unread by hand.
     
     Args:
         query: Optional search term to filter chats by name or JID
@@ -101,13 +105,15 @@ def list_chats(
         page: Page number for pagination (default 0)
         include_last_message: Whether to include the last message in each chat (default True)
         sort_by: Field to sort results by, either "last_active" or "name" (default "last_active")
+        unread_only: Only return chats with unread messages or marked unread (default False)
     """
     chats = whatsapp_list_chats(
         query=query,
         limit=limit,
         page=page,
         include_last_message=include_last_message,
-        sort_by=sort_by
+        sort_by=sort_by,
+        unread_only=unread_only
     )
     return chats
 
@@ -355,6 +361,19 @@ def delete_message(chat_jid: str, message_id: str) -> Dict[str, Any]:
         "success": success,
         "message": status_message
     }
+
+@mcp.tool()
+def mark_as_read(chat_jid: str) -> Dict[str, Any]:
+    """Mark a chat's unread messages as read, on your phone too. If your read receipts
+    are on, the senders see blue ticks, so only do this when the user wants it.
+
+    Args:
+        chat_jid: The JID of the chat, as returned by list_chats
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    return whatsapp_mark_as_read(chat_jid)
 
 @mcp.tool()
 def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:

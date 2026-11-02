@@ -176,6 +176,7 @@ This application consists of two main components:
 - All message history is stored in a SQLite database within the `whatsapp-bridge/store/` directory (or whatever `WHATSAPP_STORE_DIR` points at, when running more than one account)
 - The database maintains tables for chats, messages, reactions, polls and poll votes. Messages keep their reply context, and edits and deletions are applied to the stored copy
 - Messages you send through the MCP are stored as soon as they are sent
+- Each chat remembers how far you have read it, following what you read on your phone. When you upgrade, chats already stored count as read
 - Messages are indexed for efficient searching and retrieval
 
 ## Usage
@@ -188,11 +189,12 @@ Claude can access the following tools to interact with WhatsApp:
 
 - **search_contacts**: Search for contacts by name or phone number
 - **list_messages**: Retrieve messages with optional filters and context
-- **list_chats**: List available chats with metadata
+- **list_chats**: List available chats with metadata, including how many unread messages each has. Pass `unread_only` to list only chats with unread messages
 - **get_chat**: Get information about a specific chat
 - **get_direct_chat_by_contact**: Find a direct chat with a specific contact
 - **get_contact_chats**: List all chats involving a specific contact
 - **get_group_participants**: List the contacts that are members of a group chat, with their names, phone numbers and admin status (requires the bridge to be running)
+- **mark_as_read**: Mark a chat's unread messages as read, here and on your phone. If your read receipts are on, the senders see blue ticks (requires the bridge to be running)
 - **get_last_interaction**: Get the most recent message with a contact
 - **get_message_context**: Retrieve context around a specific message
 - **check_whatsapp_numbers**: Check which of up to 50 phone numbers are registered on WhatsApp, with each one's JID and any verified business name (requires the bridge to be running)

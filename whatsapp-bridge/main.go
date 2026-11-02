@@ -192,20 +192,25 @@ func NewMessageStore() (*MessageStore, error) {
 		{"edited_at", "TIMESTAMP"},
 		{"is_deleted", "BOOLEAN NOT NULL DEFAULT 0"},
 	} {
-		if err := ensureColumn(db, "messages", column.name, column.decl); err != nil {
+		if _, err := ensureColumn(db, "messages", column.name, column.decl); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("failed to migrate messages table: %v", err)
 		}
+	}
+	if err := migrateReadState(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate chats table: %v", err)
 	}
 
 	return &MessageStore{db: db}, nil
 }
 
-// Add a column to a table unless it already exists.
-func ensureColumn(db *sql.DB, table, column, decl string) error {
+// Add a column to a table unless it already exists, and say whether it was
+// added.
+func ensureColumn(db *sql.DB, table, column, decl string) (bool, error) {
 	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer rows.Close()
 
@@ -214,18 +219,19 @@ func ensureColumn(db *sql.DB, table, column, decl string) error {
 		var name, colType string
 		var defaultValue sql.NullString
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
-			return err
+			return false, err
 		}
 		if name == column {
-			return nil
+			return false, nil
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return false, err
 	}
+	rows.Close()
 
 	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
-	return err
+	return err == nil, err
 }
 
 // Close the database connection
@@ -233,10 +239,15 @@ func (store *MessageStore) Close() error {
 	return store.db.Close()
 }
 
-// Store a chat in the database
+// Store a chat in the database, keeping its read state. The last message
+// time only moves forward, since history syncs send older messages later.
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
-	_, err := store.db.Exec(
-		"INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)",
+	_, err := store.db.Exec(`
+		INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
+		ON CONFLICT(jid) DO UPDATE SET name = excluded.name,
+			last_message_time = CASE
+				WHEN last_message_time IS NULL OR julianday(excluded.last_message_time) > julianday(last_message_time)
+				THEN excluded.last_message_time ELSE last_message_time END`,
 		jid, name, lastMessageTime,
 	)
 	return err
@@ -771,6 +782,10 @@ func storeSentMessage(messageStore *MessageStore, chat types.JID, chatName, send
 	if err != nil {
 		return err
 	}
+	// Sending in a chat reads it, as in the WhatsApp apps
+	if err := messageStore.MarkChatRead(chatJID, timestamp); err != nil {
+		return err
+	}
 	return storePollIfAny(messageStore, msg, id, chatJID)
 }
 
@@ -1299,6 +1314,10 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 	if err == nil {
 		err = storePollIfAny(messageStore, msg.Message, msg.Info.ID, chatJID)
+	}
+	if err == nil && msg.Info.IsFromMe {
+		// A message we sent from another device means we've read the chat
+		err = messageStore.MarkChatRead(chatJID, msg.Info.Timestamp)
 	}
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
@@ -1990,6 +2009,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, liste
 
 	registerGroupHandlers(client, messageStore)
 	registerPollHandlers(client, messageStore)
+	registerReadHandlers(client, messageStore)
 
 	// Handler for posting status updates
 	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
@@ -2170,6 +2190,16 @@ func run() int {
 		case *events.HistorySync:
 			// Process history sync events
 			handleHistorySync(client, messageStore, v, logger)
+
+		case *events.Receipt:
+			if err := handleOwnReadReceipt(client, messageStore, v); err != nil {
+				logger.Warnf("Failed to store read receipt: %v", err)
+			}
+
+		case *events.MarkChatAsRead:
+			if err := handleMarkChatAsRead(client, messageStore, v); err != nil {
+				logger.Warnf("Failed to store chat read state: %v", err)
+			}
 
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
@@ -2499,6 +2529,10 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
 					}
 				}
+			}
+
+			if err := messageStore.ApplyHistoryReadState(chatJID, conversation.GetUnreadCount(), conversation.GetMarkedAsUnread()); err != nil {
+				logger.Warnf("Failed to store read state of %s: %v", chatJID, err)
 			}
 		}
 	}

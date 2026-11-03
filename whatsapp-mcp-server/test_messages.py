@@ -22,6 +22,10 @@ class MessageFormattingTests(unittest.TestCase):
                 PRIMARY KEY (id, chat_jid));
             CREATE TABLE reactions (message_id TEXT, chat_jid TEXT, sender TEXT, emoji TEXT, timestamp TIMESTAMP,
                 PRIMARY KEY (message_id, chat_jid, sender));
+            CREATE TABLE polls (message_id TEXT, chat_jid TEXT, question TEXT, options TEXT, selectable_count INTEGER,
+                PRIMARY KEY (message_id, chat_jid));
+            CREATE TABLE poll_votes (poll_id TEXT, chat_jid TEXT, voter TEXT, options TEXT, timestamp TIMESTAMP,
+                PRIMARY KEY (poll_id, chat_jid, voter));
         """)
         conn.execute("INSERT INTO chats VALUES (?, 'Alex', '2026-10-30 10:05:00+00:00')", (CHAT,))
         rows = [

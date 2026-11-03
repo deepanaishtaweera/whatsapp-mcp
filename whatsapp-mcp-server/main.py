@@ -365,7 +365,11 @@ def delete_message(chat_jid: str, message_id: str) -> Dict[str, Any]:
 @mcp.tool()
 def mark_as_read(chat_jid: str) -> Dict[str, Any]:
     """Mark a chat's unread messages as read, on your phone too. If your read receipts
-    are on, the senders see blue ticks, so only do this when the user wants it.
+    are on, the senders see blue ticks.
+
+    Reading messages with the other tools never marks them read, so the user still
+    sees them as unread. Only call this when the user explicitly asks to mark a chat
+    as read, never just because you read or replied to its messages.
 
     Args:
         chat_jid: The JID of the chat, as returned by list_chats

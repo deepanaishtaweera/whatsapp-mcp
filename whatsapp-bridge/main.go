@@ -782,10 +782,8 @@ func storeSentMessage(messageStore *MessageStore, chat types.JID, chatName, send
 	if err != nil {
 		return err
 	}
-	// Sending in a chat reads it, as in the WhatsApp apps
-	if err := messageStore.MarkChatRead(chatJID, timestamp); err != nil {
-		return err
-	}
+	// Unlike in the WhatsApp apps, sending here doesn't read the chat: the
+	// agent may reply to messages you haven't seen yet
 	return storePollIfAny(messageStore, msg, id, chatJID)
 }
 

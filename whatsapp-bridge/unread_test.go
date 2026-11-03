@@ -102,14 +102,14 @@ func TestMarkChatUnread(t *testing.T) {
 	}
 }
 
-func TestSentMessageReadsChat(t *testing.T) {
+func TestSentMessageKeepsChatUnread(t *testing.T) {
 	store := newTestStore(t)
 	storeAt(t, store, "a", "123", time.Unix(100, 0), false)
 	if err := storeSentMessage(store, types.NewJID("123", types.DefaultUserServer), "Test", "111", "mine", time.Unix(200, 0), &waProto.Message{Conversation: proto.String("hello")}); err != nil {
 		t.Fatalf("storeSentMessage: %v", err)
 	}
-	if got := unreadIDs(t, store); len(got) != 0 {
-		t.Errorf("unread after replying = %v", got)
+	if got := unreadIDs(t, store); !reflect.DeepEqual(got, []string{"a"}) {
+		t.Errorf("unread after the agent replied = %v, want [a]", got)
 	}
 }
 

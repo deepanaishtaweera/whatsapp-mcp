@@ -194,7 +194,7 @@ Claude can access the following tools to interact with WhatsApp:
 - **get_direct_chat_by_contact**: Find a direct chat with a specific contact
 - **get_contact_chats**: List all chats involving a specific contact
 - **get_group_participants**: List the contacts that are members of a group chat, with their names, phone numbers and admin status (requires the bridge to be running)
-- **mark_as_read**: Mark a chat's unread messages as read, here and on your phone. If your read receipts are on, the senders see blue ticks (requires the bridge to be running)
+- **mark_as_read**: Mark a chat's unread messages as read, here and on your phone. If your read receipts are on, the senders see blue ticks. Reading or replying through the other tools never marks anything read, so this is only for when you ask for it (requires the bridge to be running)
 - **get_last_interaction**: Get the most recent message with a contact
 - **get_message_context**: Retrieve context around a specific message
 - **check_whatsapp_numbers**: Check which of up to 50 phone numbers are registered on WhatsApp, with each one's JID and any verified business name (requires the bridge to be running)

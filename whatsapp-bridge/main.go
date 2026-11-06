@@ -548,10 +548,11 @@ type SendMessageResponse struct {
 
 // SendMessageRequest represents the request body for the send message API
 type SendMessageRequest struct {
-	Recipient string `json:"recipient"`
-	Message   string `json:"message"`
-	MediaPath string `json:"media_path,omitempty"`
-	ReplyTo   string `json:"reply_to,omitempty"`
+	Recipient string   `json:"recipient"`
+	Message   string   `json:"message"`
+	MediaPath string   `json:"media_path,omitempty"`
+	ReplyTo   string   `json:"reply_to,omitempty"`
+	Mentions  []string `json:"mentions,omitempty"`
 }
 
 // SendReactionRequest represents the request body for the reaction API. An
@@ -697,7 +698,7 @@ func resolveParticipantName(ctx context.Context, client *whatsmeow.Client, parti
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, replyTo string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, replyTo string, mentions []string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -720,28 +721,43 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		}
 	}
 
+	message, mentioned, err := resolveMentions(context.Background(), client, recipientJID, message, mentions)
+	if err != nil {
+		return false, err.Error()
+	}
+
 	msg, err := buildOutgoingMessage(client, message, mediaPath)
 	if err != nil {
 		return false, err.Error()
 	}
-	if reply != nil {
+	if reply != nil || len(mentioned) > 0 {
+		if reply == nil {
+			reply = &waProto.ContextInfo{}
+		}
+		reply.MentionedJID = mentioned
 		attachReplyContext(msg, reply)
 	}
 
-	// Send message
-	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
-
+	id, err := sendAndStore(client, messageStore, recipientJID, msg)
 	if err != nil {
-		return false, fmt.Sprintf("Error sending message: %v", err)
+		return false, err.Error()
+	}
+	return true, fmt.Sprintf("Message sent to %s (ID: %s)", recipient, id)
+}
+
+// Send a built message and save it, returning its ID.
+func sendAndStore(client *whatsmeow.Client, messageStore *MessageStore, chat types.JID, msg *waProto.Message) (string, error) {
+	resp, err := client.SendMessage(context.Background(), chat, msg)
+	if err != nil {
+		return "", fmt.Errorf("Error sending message: %v", err)
 	}
 
-	name := GetChatName(client, messageStore, recipientJID, recipientJID.String(), nil, "", waLog.Noop)
-	sender := ownJIDFor(client, recipientJID).User
-	if err := storeSentMessage(messageStore, recipientJID, name, sender, resp.ID, resp.Timestamp, msg); err != nil {
+	name := GetChatName(client, messageStore, chat, chat.String(), nil, "", waLog.Noop)
+	sender := ownJIDFor(client, chat).User
+	if err := storeSentMessage(messageStore, chat, name, sender, resp.ID, resp.Timestamp, msg); err != nil {
 		fmt.Printf("Message sent but not stored: %v\n", err)
 	}
-
-	return true, fmt.Sprintf("Message sent to %s (ID: %s)", recipient, resp.ID)
+	return resp.ID, nil
 }
 
 // A recipient is a JID, or a phone number for a direct chat.
@@ -1075,8 +1091,8 @@ func quotedMessageStub(target StoredMessage) *waProto.Message {
 	return &waProto.Message{Conversation: proto.String(target.Content)}
 }
 
-// Attach reply context to outgoing content. Plain text can't carry context,
-// so it becomes an extended text message.
+// Attach context (a reply, mentions, a forward label) to outgoing content.
+// Plain text can't carry context, so it becomes an extended text message.
 func attachReplyContext(msg *waProto.Message, ci *waProto.ContextInfo) {
 	switch {
 	case msg.Conversation != nil:
@@ -1895,7 +1911,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, liste
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath, req.ReplyTo)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath, req.ReplyTo, req.Mentions)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -2008,6 +2024,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, liste
 	registerGroupHandlers(client, messageStore)
 	registerPollHandlers(client, messageStore)
 	registerReadHandlers(client, messageStore)
+	registerForwardHandlers(client, messageStore)
 
 	// Handler for posting status updates
 	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {

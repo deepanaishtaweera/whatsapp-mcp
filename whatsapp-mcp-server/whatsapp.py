@@ -784,7 +784,8 @@ def get_contact_info(contact: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         return {"success": False, "message": f"Error parsing response: {response.text}"}
 
-def send_message(recipient: str, message: str, reply_to: Optional[str] = None) -> Tuple[bool, str]:
+def send_message(recipient: str, message: str, reply_to: Optional[str] = None,
+                 mentions: Optional[List[str]] = None) -> Tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
@@ -797,6 +798,8 @@ def send_message(recipient: str, message: str, reply_to: Optional[str] = None) -
         }
         if reply_to:
             payload["reply_to"] = reply_to
+        if mentions:
+            payload["mentions"] = mentions
         
         response = requests.post(url, json=payload)
         return _bridge_result(response)
@@ -904,6 +907,9 @@ def _bridge_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if response.status_code != 200:
         return {"success": False, "message": result.get("message") or _bridge_error(response)}
     return result
+
+def forward_message(chat_jid: str, message_id: str, to: str) -> Dict[str, Any]:
+    return _bridge_post("forward", {"chat_jid": chat_jid, "message_id": message_id, "to": to})
 
 def create_group(name: str, participants: List[str]) -> Dict[str, Any]:
     return _bridge_post("group-create", {"name": name, "participants": participants})

@@ -27,6 +27,7 @@ from whatsapp import (
     edit_message as whatsapp_edit_message,
     delete_message as whatsapp_delete_message,
     mark_as_read as whatsapp_mark_as_read,
+    forward_message as whatsapp_forward_message,
     check_whatsapp_numbers as whatsapp_check_whatsapp_numbers,
     get_contact_info as whatsapp_get_contact_info,
     download_media as whatsapp_download_media
@@ -257,7 +258,8 @@ def get_contact_info(contact: str) -> Dict[str, Any]:
 def send_message(
     recipient: str,
     message: str,
-    reply_to: Optional[str] = None
+    reply_to: Optional[str] = None,
+    mentions: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
@@ -267,6 +269,9 @@ def send_message(
         message: The message text to send
         reply_to: Optional ID of a message to reply to, as shown by list_messages. When replying,
                  use that message's chat JID as the recipient.
+        mentions: Optional people to tag in a group, as phone numbers with country code or JIDs
+                 (for example from get_group_participants). Write "@<phone number>" where each
+                 tag should go; tags missing from the text are added at the end.
 
     Returns:
         A dictionary containing success status and a status message with the sent message's ID
@@ -279,11 +284,25 @@ def send_message(
         }
     
     # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message, reply_to)
+    success, status_message = whatsapp_send_message(recipient, message, reply_to, mentions)
     return {
         "success": success,
         "message": status_message
     }
+
+@mcp.tool()
+def forward_message(chat_jid: str, message_id: str, to: str) -> Dict[str, Any]:
+    """Forward a text or media message to another chat, labelled "Forwarded" like in the app.
+
+    Args:
+        chat_jid: The JID of the chat the message is in
+        message_id: The ID of the message, as shown by list_messages
+        to: The recipient - a phone number with country code, or a person's or group's JID
+
+    Returns:
+        A dictionary containing success status and a status message with the new message's ID
+    """
+    return whatsapp_forward_message(chat_jid, message_id, to)
 
 @mcp.tool()
 def send_file(recipient: str, media_path: str, reply_to: Optional[str] = None) -> Dict[str, Any]:

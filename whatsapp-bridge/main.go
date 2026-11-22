@@ -8,6 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"math"
 	"math/rand"
 	"net"
@@ -815,6 +819,15 @@ func deleteWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore,
 
 // Build the content of an outgoing message, uploading the media first when a
 // media path is given. With media, message becomes the caption.
+// WhatsApp sizes the image bubble from these; without them the apps squash the image into a default box.
+// shortcut: WebP and EXIF rotation aren't handled, so those images still go out without a size.
+func setImageSize(img *waProto.ImageMessage, data []byte) {
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
+		img.Width = proto.Uint32(uint32(cfg.Width))
+		img.Height = proto.Uint32(uint32(cfg.Height))
+	}
+}
+
 func buildOutgoingMessage(client *whatsmeow.Client, message string, mediaPath string) (*waProto.Message, error) {
 	msg := &waProto.Message{}
 
@@ -890,6 +903,7 @@ func buildOutgoingMessage(client *whatsmeow.Client, message string, mediaPath st
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    &resp.FileLength,
 			}
+			setImageSize(msg.ImageMessage, mediaData)
 		case whatsmeow.MediaAudio:
 			// Handle ogg audio files
 			var seconds uint32 = 30 // Default fallback

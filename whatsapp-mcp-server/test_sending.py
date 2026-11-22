@@ -20,6 +20,22 @@ class ReplyTests(unittest.TestCase):
         self.assertTrue(success)
         self.assertEqual(post.call_args.kwargs["json"]["reply_to"], "m1")
 
+    def test_mentions_are_sent_only_when_given(self):
+        ok = bridge_response(200, {"success": True, "message": "sent"})
+        with patch.object(whatsapp.requests, "post", return_value=ok) as post:
+            whatsapp.send_message("1@g.us", "hi")
+            self.assertNotIn("mentions", post.call_args.kwargs["json"])
+            whatsapp.send_message("1@g.us", "hi @456", mentions=["+456"])
+        self.assertEqual(post.call_args.kwargs["json"]["mentions"], ["+456"])
+
+    def test_forward(self):
+        ok = bridge_response(200, {"success": True, "message": "Forwarded"})
+        with patch.object(whatsapp.requests, "post", return_value=ok) as post:
+            result = whatsapp.forward_message("123@s.whatsapp.net", "m1", "456")
+        self.assertTrue(post.call_args.args[0].endswith("/forward"))
+        self.assertEqual(post.call_args.kwargs["json"], {"chat_jid": "123@s.whatsapp.net", "message_id": "m1", "to": "456"})
+        self.assertTrue(result["success"])
+
     def test_file_reply(self):
         ok = bridge_response(200, {"success": True, "message": "sent"})
         with patch.object(whatsapp.os.path, "isfile", return_value=True), \

@@ -199,7 +199,8 @@ Claude can access the following tools to interact with WhatsApp:
 - **get_message_context**: Retrieve context around a specific message
 - **check_whatsapp_numbers**: Check which of up to 50 phone numbers are registered on WhatsApp, with each one's JID and any verified business name (requires the bridge to be running)
 - **get_contact_info**: Look up a contact's WhatsApp profile by phone number or JID: name, about text, verified business name and profile picture (requires the bridge to be running)
-- **send_message**: Send a WhatsApp message to a specified phone number or group JID. Pass `reply_to` with a message ID to send it as a reply. Returns the sent message's ID
+- **send_message**: Send a WhatsApp message to a specified phone number or group JID. Pass `reply_to` with a message ID to send it as a reply, and `mentions` with phone numbers or JIDs to tag people in a group. Returns the sent message's ID
+- **forward_message**: Forward a text or media message to another chat, with WhatsApp's "Forwarded" label. Media is downloaded and uploaded again, since stored media links expire
 - **send_file**: Send a file (image, video, raw audio, document) to a specified recipient, optionally as a reply with `reply_to`
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
 - **send_reaction**: React to a message with an emoji, or pass an empty emoji to remove your reaction

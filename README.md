@@ -2,7 +2,7 @@
 
 This is a Model Context Protocol (MCP) server for WhatsApp.
 
-With this you can search and read your personal Whatsapp messages (including images, videos, documents, and audio messages), search your contacts and send messages to either individuals or groups. You can also send media files including images, videos, documents, and audio messages.
+With this you can search and read your personal Whatsapp messages (including images, videos, documents, and audio messages), search your contacts and send messages to either individuals or groups. You can also send media files including images, videos, documents, and audio messages, reply to and react to messages, edit or delete what you sent, post a WhatsApp Status, create and vote in polls, manage groups, and check whether phone numbers are on WhatsApp.
 
 It connects to your **personal WhatsApp account** directly via the Whatsapp web multidevice API (using the [whatsmeow](https://github.com/tulir/whatsmeow) library). All your messages are stored locally in a SQLite database and only sent to an LLM (such as Claude) when the agent accesses them through tools (which you control).
 
@@ -174,7 +174,8 @@ This application consists of two main components:
 ### Data Storage
 
 - All message history is stored in a SQLite database within the `whatsapp-bridge/store/` directory (or whatever `WHATSAPP_STORE_DIR` points at, when running more than one account)
-- The database maintains tables for chats and messages
+- The database maintains tables for chats, messages, reactions, polls and poll votes. Messages keep their reply context, and edits and deletions are applied to the stored copy
+- Messages you send through the MCP are stored as soon as they are sent
 - Messages are indexed for efficient searching and retrieval
 
 ## Usage
@@ -194,9 +195,24 @@ Claude can access the following tools to interact with WhatsApp:
 - **get_group_participants**: List the contacts that are members of a group chat, with their names, phone numbers and admin status (requires the bridge to be running)
 - **get_last_interaction**: Get the most recent message with a contact
 - **get_message_context**: Retrieve context around a specific message
-- **send_message**: Send a WhatsApp message to a specified phone number or group JID
-- **send_file**: Send a file (image, video, raw audio, document) to a specified recipient
+- **check_whatsapp_numbers**: Check which of up to 50 phone numbers are registered on WhatsApp, with each one's JID and any verified business name (requires the bridge to be running)
+- **get_contact_info**: Look up a contact's WhatsApp profile by phone number or JID: name, about text, verified business name and profile picture (requires the bridge to be running)
+- **send_message**: Send a WhatsApp message to a specified phone number or group JID. Pass `reply_to` with a message ID to send it as a reply. Returns the sent message's ID
+- **send_file**: Send a file (image, video, raw audio, document) to a specified recipient, optionally as a reply with `reply_to`
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
+- **send_reaction**: React to a message with an emoji, or pass an empty emoji to remove your reaction
+- **edit_message**: Change the text of one of your own text messages, up to 15 minutes after sending it
+- **delete_message**: Delete one of your own messages for everyone, up to 60 hours after sending it
+- **send_status**: Post a WhatsApp Status: text on a colored background, or an image or video with an optional caption
+- **create_poll**: Send a poll with 2 to 12 answers to a person or group, allowing one answer or several
+- **vote_poll**: Vote on a poll, or take your vote back
+- **get_poll_results**: Get the votes on a poll: the count for each answer and who chose it
+- **create_group**: Create a group with a name and the people to add
+- **update_group_participants**: Add or remove group members, or make them admins or not (you must be a group admin)
+- **update_group**: Rename a group or change its description
+- **get_group_invite_link**: Get a group's invite link, or reset it so the old one stops working
+- **join_group**: Join a group using an invite link
+- **leave_group**: Leave a group
 - **download_media**: Download media from a WhatsApp message and get the local file path
 
 ### Media Handling Features
@@ -208,6 +224,7 @@ The MCP server supports both sending and receiving various media types:
 You can send various media types to your WhatsApp contacts:
 
 - **Images, Videos, Documents**: Use the `send_file` tool to share any supported media type.
+- **Status**: Use the `send_status` tool with `media_path` to post an image (.jpg, .png, .webp) or video (.mp4, .mov, .avi) as your Status. GIFs aren't supported; convert them to .mp4 first.
 - **Voice Messages**: Use the `send_audio_message` tool to send audio files as playable WhatsApp voice messages.
   - For optimal compatibility, audio files should be in `.ogg` Opus format.
   - With FFmpeg installed, the system will automatically convert other audio formats (MP3, WAV, etc.) to the required format.

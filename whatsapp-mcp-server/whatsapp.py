@@ -64,6 +64,7 @@ class Message:
     is_edited: bool = False
     is_deleted: bool = False
     reactions: Optional[str] = None
+    poll_options: Optional[List[str]] = None
 
 # Columns selected for every Message (messages joined with chats), in the
 # order _message_from_row reads them. Reactions come back as one string of
@@ -73,7 +74,9 @@ MESSAGE_COLUMNS = """
     chats.jid, messages.id, messages.media_type, messages.quoted_sender, messages.quoted_content,
     messages.edited_at IS NOT NULL, messages.is_deleted,
     (SELECT group_concat(reactions.emoji, '') FROM reactions
-     WHERE reactions.message_id = messages.id AND reactions.chat_jid = messages.chat_jid)
+     WHERE reactions.message_id = messages.id AND reactions.chat_jid = messages.chat_jid),
+    (SELECT polls.options FROM polls
+     WHERE polls.message_id = messages.id AND polls.chat_jid = messages.chat_jid)
 """
 
 def _schema_error(e: sqlite3.Error) -> Optional[str]:
@@ -98,6 +101,7 @@ def _message_from_row(row) -> Message:
         is_edited=bool(row[10]),
         is_deleted=bool(row[11]),
         reactions=row[12],
+        poll_options=json.loads(row[13]) if row[13] else None,
     )
 
 @dataclass
@@ -198,7 +202,9 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
         output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
         
     content_prefix = ""
-    if message.media_type and message.is_deleted:
+    if message.poll_options is not None and not message.is_deleted:
+        content_prefix = f"[poll - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
+    elif message.media_type and message.is_deleted:
         content_prefix = f"[{message.media_type}] "
     elif message.media_type:
         content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
@@ -208,6 +214,8 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
         content = "[deleted]"
     elif message.is_edited:
         content += " (edited)"
+    if message.poll_options is not None and not message.is_deleted:
+        content += f" (options: {' / '.join(message.poll_options)})"
 
     reply_prefix = ""
     if message.quoted_content is not None or message.quoted_sender:
@@ -912,6 +920,92 @@ def delete_message(chat_jid: str, message_id: str) -> Tuple[bool, str]:
 
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
+
+def _bridge_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """POST to the bridge and return its JSON answer, or a failure dict."""
+    try:
+        response = requests.post(f"{WHATSAPP_API_BASE_URL}/{path}", json=payload, timeout=60)
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Request error: {str(e)}"}
+    try:
+        result = response.json()
+    except ValueError:
+        return {"success": False, "message": _bridge_error(response)}
+    if response.status_code != 200:
+        return {"success": False, "message": result.get("message") or _bridge_error(response)}
+    return result
+
+def create_group(name: str, participants: List[str]) -> Dict[str, Any]:
+    return _bridge_post("group-create", {"name": name, "participants": participants})
+
+def update_group_participants(group_jid: str, participants: List[str], action: str) -> Dict[str, Any]:
+    return _bridge_post("group-participants",
+                        {"group_jid": group_jid, "participants": participants, "action": action})
+
+def update_group(group_jid: str, name: Optional[str] = None, description: Optional[str] = None) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"group_jid": group_jid}
+    if name is not None:
+        payload["name"] = name
+    if description is not None:
+        payload["description"] = description
+    return _bridge_post("group-update", payload)
+
+def get_group_invite_link(group_jid: str, reset: bool = False) -> Dict[str, Any]:
+    return _bridge_post("group-invite-link", {"group_jid": group_jid, "reset": reset})
+
+def leave_group(group_jid: str) -> Dict[str, Any]:
+    return _bridge_post("group-leave", {"group_jid": group_jid})
+
+def join_group(invite_link: str) -> Dict[str, Any]:
+    return _bridge_post("group-join", {"invite_link": invite_link})
+
+def create_poll(recipient: str, question: str, options: List[str], multiple_answers: bool = False) -> Dict[str, Any]:
+    return _bridge_post("poll", {"recipient": recipient, "question": question,
+                                 "options": options, "multiple_answers": multiple_answers})
+
+def vote_poll(chat_jid: str, message_id: str, options: List[str]) -> Dict[str, Any]:
+    return _bridge_post("poll-vote", {"chat_jid": chat_jid, "message_id": message_id, "options": options})
+
+def get_poll_results(chat_jid: str, message_id: str) -> Dict[str, Any]:
+    """Count the stored votes on a poll, with who chose each option."""
+    try:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        try:
+            poll = conn.execute(
+                "SELECT question, options, selectable_count FROM polls WHERE message_id = ? AND chat_jid = ?",
+                (message_id, chat_jid),
+            ).fetchone()
+            if not poll:
+                return {"success": False, "message": f"No poll {message_id} in chat {chat_jid}"}
+            votes = conn.execute(
+                "SELECT voter, options FROM poll_votes WHERE poll_id = ? AND chat_jid = ? ORDER BY timestamp",
+                (message_id, chat_jid),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        return {"success": False, "message": _schema_error(e) or f"Database error: {e}"}
+
+    question, options_json, selectable = poll
+    options = json.loads(options_json)
+    voters: Dict[str, List[str]] = {option: [] for option in options}
+    voter_count = 0
+    for voter, chosen_json in votes:
+        chosen = json.loads(chosen_json)
+        if chosen:
+            voter_count += 1
+        name = get_sender_name(voter)
+        for option in chosen:
+            if option in voters:
+                voters[option].append(name)
+    return {
+        "success": True,
+        "question": question,
+        "multiple_answers": selectable != 1,
+        "voters": voter_count,
+        "options": [{"option": option, "votes": len(voters[option]), "voted_by": voters[option]}
+                    for option in options],
+    }
 
 def send_status(message: str = "", media_path: Optional[str] = None, background_color: Optional[str] = None) -> Tuple[bool, str]:
     try:
